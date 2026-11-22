@@ -1,0 +1,9 @@
+# Entorno y cachés
+.venv/
+__pycache__/
+.ipynb_checkpoints/
+.claude/settings.local.json
+
+# Pesados: se regeneran (ver README)
+data/
+models/

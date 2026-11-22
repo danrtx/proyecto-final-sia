@@ -1,0 +1,19 @@
+# PyTorch con CUDA (instalar primero):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+transformers>=5.0
+datasets
+accelerate
+evaluate
+scikit-learn
+opencv-python
+imageio[ffmpeg]
+gradio>=6.0
+pandas
+matplotlib
+seaborn
+pillow
+sentencepiece
+jupyter
+ipykernel
+nbformat
+nbconvert
