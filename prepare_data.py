@@ -21,7 +21,7 @@ def main():
 
     for clase, archivos in por_clase.items():
         random.shuffle(archivos)
-        archivos = archivos[:MAX_POR_CLASE]
+        archivos = archivos[:MAX_POR_CLASE] if MAX_POR_CLASE else archivos
         n = len(archivos)
         cortes = {"train": archivos[: int(n * 0.70)],
                   "val": archivos[int(n * 0.70): int(n * 0.85)],
