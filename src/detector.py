@@ -1,10 +1,14 @@
-"""Pipeline de visión: detección (OWLv2) + clasificación de material (ViT afinado).
+"""Detección de residuos en imágenes y video.
 
-Etapa 1 – OWLv2 (Vision Transformer + encoder de texto, pre-entrenado por Google):
-          localiza objetos a partir de consultas en lenguaje natural ("a plastic bottle"...).
-Etapa 2 – ViT afinado por nosotros: recorta cada caja y decide el material
-          (plástico, papel, cartón, vidrio, metal u orgánico).
-Etapa 3 – Reglas: orgánico / inorgánico y caneca según la Res. 2184 de 2019.
+1) Localización de objetos con visión por computador CLÁSICA (OpenCV, sin modelos pre-entrenados):
+   - Video: sustracción de fondo (MOG2), que separa lo que se mueve (los residuos en la banda)
+     del fondo estático.
+   - Imagen / webcam: segmentación por contraste con el color de fondo estimado en los bordes
+     de la imagen, más detección de bordes (Canny).
+   - Operaciones morfológicas + contornos -> cajas delimitadoras.
+2) Clasificación de cada objeto con EcoNet (CNN propia entrenada desde cero).
+3) Reglas: orgánico / inorgánico y caneca (Resolución 2184 de 2019).
+4) Tracker por IoU para contar cada objeto una sola vez en el video.
 """
 from __future__ import annotations
 
@@ -14,24 +18,17 @@ from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
-import torch
 from PIL import Image
-from torchvision.ops import nms
-from transformers import (Owlv2ForObjectDetection, Owlv2Processor,
-                          ViTForImageClassification, ViTImageProcessor)
 
-from config import (CONSULTAS_DETECTOR, DETECTOR, INFO_CLASES, PISTA_CONSULTA,
-                    UMBRAL_CONFIANZA_VIT, UMBRAL_DETECCION, UMBRAL_NMS, VIT_FINETUNED)
+from config import AREA_MAX, AREA_MIN, CNN_PESOS, CONF_MIN_CNN, INFO_CLASES
+from src.cnn import ClasificadorCNN
 
 
 @dataclass
 class Deteccion:
     caja: tuple[int, int, int, int]
-    score_det: float
-    consulta: str
     clase: str
-    conf_clase: float
-    fuente: str  # "ViT" o "detector"
+    conf: float
     track_id: int | None = None
 
     @property
@@ -39,14 +36,7 @@ class Deteccion:
         return INFO_CLASES[self.clase]
 
 
-@dataclass
-class _Track:
-    id: int
-    caja: tuple
-    votos: Counter = field(default_factory=Counter)
-    perdido: int = 0
-
-
+# ------------------------------------------------------------------ utilidades de cajas
 def _iou(a, b):
     x1, y1, x2, y2 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
     inter = max(0, x2 - x1) * max(0, y2 - y1)
@@ -54,8 +44,65 @@ def _iou(a, b):
     return inter / ua if ua > 0 else 0.0
 
 
+def _contenida(a, b):
+    """Fracción de la caja a que está dentro de b."""
+    x1, y1, x2, y2 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area = (a[2] - a[0]) * (a[3] - a[1])
+    return inter / area if area else 0.0
+
+
+def _fusionar(cajas):
+    cajas = sorted(cajas, key=lambda c: -(c[2] - c[0]) * (c[3] - c[1]))
+    final = []
+    for c in cajas:
+        if all(_contenida(c, f) < 0.7 and _iou(c, f) < 0.4 for f in final):
+            final.append(c)
+    return final
+
+
+def _cajas_desde_mascara(mascara, W, H):
+    k = max(3, (min(W, H) // 120) | 1)
+    mascara = cv2.morphologyEx(mascara, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
+    mascara = cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, np.ones((2 * k, 2 * k), np.uint8))
+    contornos, _ = cv2.findContours(mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cajas = []
+    for c in contornos:
+        x, y, w, h = cv2.boundingRect(c)
+        a = w * h / (W * H)
+        if AREA_MIN <= a <= AREA_MAX and min(w, h) > 12:
+            cajas.append((x, y, x + w, y + h))
+    return _fusionar(cajas)
+
+
+def proponer_objetos_imagen(bgr: np.ndarray):
+    """Segmenta objetos contra el fondo estimado en los bordes de la imagen."""
+    H, W = bgr.shape[:2]
+    lab = cv2.cvtColor(cv2.GaussianBlur(bgr, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    b = max(4, min(W, H) // 30)
+    borde = np.concatenate([lab[:b].reshape(-1, 3), lab[-b:].reshape(-1, 3),
+                            lab[:, :b].reshape(-1, 3), lab[:, -b:].reshape(-1, 3)])
+    fondo = np.median(borde, axis=0)
+    dist = np.linalg.norm(lab - fondo, axis=2)
+    umbral = max(18.0, float(np.percentile(np.linalg.norm(borde - fondo, axis=1), 95)) * 1.2)
+    mascara = (dist > umbral).astype(np.uint8) * 255
+    bordes = cv2.dilate(cv2.Canny(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), 60, 160), np.ones((3, 3), np.uint8))
+    mascara = cv2.bitwise_or(mascara, bordes)
+    return _cajas_desde_mascara(mascara, W, H)
+
+
+# ------------------------------------------------------------------ tracker
+@dataclass
+class _Track:
+    id: int
+    caja: tuple
+    votos: Counter = field(default_factory=Counter)  # suma de confianzas por clase
+    apariciones: int = 0
+    perdido: int = 0
+
+
 class Tracker:
-    """Seguimiento simple por IoU para no contar el mismo objeto en cada cuadro."""
+    """Seguimiento por IoU para no contar el mismo objeto en cada cuadro."""
 
     def __init__(self, iou_min=0.2, max_perdido=5):
         self.iou_min, self.max_perdido = iou_min, max_perdido
@@ -65,7 +112,7 @@ class Tracker:
 
     def actualizar(self, dets: list[Deteccion]):
         libres = set(range(len(self.tracks)))
-        for d in sorted(dets, key=lambda d: -d.score_det):
+        for d in sorted(dets, key=lambda d: -d.conf):
             mejor, mejor_iou = None, self.iou_min
             for i in libres:
                 v = _iou(d.caja, self.tracks[i].caja)
@@ -77,7 +124,8 @@ class Tracker:
             else:
                 t = self.tracks[mejor]; libres.discard(mejor)
                 t.caja, t.perdido = d.caja, 0
-            t.votos[d.clase] += 1
+            t.votos[d.clase] += d.conf
+            t.apariciones += 1
             d.track_id = t.id
         for i in libres:
             self.tracks[i].perdido += 1
@@ -88,81 +136,34 @@ class Tracker:
 
     def resumen(self, min_apariciones=3) -> Counter:
         todos = self.finalizados + self.tracks
-        return Counter(t.votos.most_common(1)[0][0] for t in todos
-                       if sum(t.votos.values()) >= min_apariciones)
+        return Counter(t.votos.most_common(1)[0][0] for t in todos if t.apariciones >= min_apariciones)
 
 
+# ------------------------------------------------------------------ sistema
 class SistemaResiduos:
     def __init__(self, device: str | None = None):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        dtype = torch.float16 if self.device == "cuda" else torch.float32
-        self.dtype = dtype
+        if not CNN_PESOS.exists():
+            raise FileNotFoundError(f"No existe {CNN_PESOS}. Ejecuta notebooks/01_cnn_desde_cero.ipynb")
+        self.cnn = ClasificadorCNN(CNN_PESOS, device)
 
-        self.det_proc = Owlv2Processor.from_pretrained(DETECTOR)
-        self.det = Owlv2ForObjectDetection.from_pretrained(DETECTOR, dtype=dtype).to(self.device).eval()
+    def clasificar_cajas(self, bgr: np.ndarray, cajas) -> list[Deteccion]:
+        H, W = bgr.shape[:2]
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        recortes = []
+        for x1, y1, x2, y2 in cajas:
+            px, py = int(0.06 * (x2 - x1)), int(0.06 * (y2 - y1))
+            recortes.append(Image.fromarray(rgb[max(0, y1 - py):min(H, y2 + py), max(0, x1 - px):min(W, x2 + px)]))
+        preds = self.cnn.predecir(recortes)
+        return [Deteccion(c, clase, conf) for c, (clase, conf, _) in zip(cajas, preds) if conf >= CONF_MIN_CNN]
 
-        if not VIT_FINETUNED.exists():
-            raise FileNotFoundError(
-                f"No existe {VIT_FINETUNED}. Ejecuta primero notebooks/01_finetuning_vit.ipynb")
-        self.cls_proc = ViTImageProcessor.from_pretrained(VIT_FINETUNED)
-        self.cls = ViTForImageClassification.from_pretrained(VIT_FINETUNED, dtype=dtype).to(self.device).eval()
-        self.id2label = self.cls.config.id2label
-
-    # ------------------------------------------------------------------ imagen
-    @torch.no_grad()
-    def detectar(self, imagen: Image.Image, umbral: float = UMBRAL_DETECCION) -> list[Deteccion]:
-        imagen = imagen.convert("RGB")
-        W, H = imagen.size
-        inp = self.det_proc(text=[CONSULTAS_DETECTOR], images=imagen, return_tensors="pt").to(self.device)
-        inp["pixel_values"] = inp["pixel_values"].to(self.dtype)
-        out = self.det(**inp)
-        lado = max(W, H)  # OWLv2 rellena la imagen hasta hacerla cuadrada
-        res = self.det_proc.post_process_grounded_object_detection(
-            out, threshold=umbral, target_sizes=torch.tensor([[lado, lado]], device=self.device))[0]
-        cajas, scores, etiquetas = res["boxes"].float(), res["scores"].float(), res["labels"]
-        if len(cajas) == 0:
-            return []
-
-        cajas[:, [0, 2]] = cajas[:, [0, 2]].clamp(0, W)
-        cajas[:, [1, 3]] = cajas[:, [1, 3]].clamp(0, H)
-        area = (cajas[:, 2] - cajas[:, 0]) * (cajas[:, 3] - cajas[:, 1])
-        ok = (area > 0.002 * W * H) & (area < 0.85 * W * H)
-        cajas, scores, etiquetas = cajas[ok], scores[ok], etiquetas[ok]
-        keep = nms(cajas, scores, UMBRAL_NMS)[:25]
-        cajas, scores, etiquetas = cajas[keep], scores[keep], etiquetas[keep]
-        # Supresión por contención: descarta cajas que están casi completas dentro de
-        # otra (partes de un objeto, p. ej. la boca de una botella o el borde de una caja).
-        areas = (cajas[:, 2] - cajas[:, 0]) * (cajas[:, 3] - cajas[:, 1])
-        lt = torch.max(cajas[:, None, :2], cajas[None, :, :2])
-        rb = torch.min(cajas[:, None, 2:], cajas[None, :, 2:])
-        inter = (rb - lt).clamp(min=0).prod(-1)
-        contenida = inter / areas[:, None]          # fracción de la caja i dentro de j
-        contenida.fill_diagonal_(0)
-        mas_grande = areas[None, :] > areas[:, None]
-        ok = ~((contenida > 0.75) & mas_grande).any(1)
-        cajas, scores, etiquetas = cajas[ok], scores[ok], etiquetas[ok]
-        if len(cajas) == 0:
-            return []
-
-        recortes, cajas_int = [], []
-        for b in cajas.round().int().tolist():
-            x1, y1, x2, y2 = b
-            pad_x, pad_y = int(0.05 * (x2 - x1)), int(0.05 * (y2 - y1))
-            recortes.append(imagen.crop((max(0, x1 - pad_x), max(0, y1 - pad_y),
-                                         min(W, x2 + pad_x), min(H, y2 + pad_y))))
-            cajas_int.append((x1, y1, x2, y2))
-        px = self.cls_proc(images=recortes, return_tensors="pt")["pixel_values"].to(self.device, self.dtype)
-        probs = self.cls(pixel_values=px).logits.float().softmax(-1).cpu()
-
-        dets = []
-        for caja, s, e, p in zip(cajas_int, scores.tolist(), etiquetas.tolist(), probs):
-            consulta = CONSULTAS_DETECTOR[e]
-            c = int(p.argmax())
-            clase, conf, fuente = self.id2label[c], float(p[c]), "ViT"
-            if conf < UMBRAL_CONFIANZA_VIT:  # el ViT duda: usamos la pista del detector
-                clase, fuente = PISTA_CONSULTA[consulta], "detector"
-                conf = float(p[self.cls.config.label2id[clase]])
-            dets.append(Deteccion(caja, float(s), consulta, clase, conf, fuente))
+    def detectar_imagen(self, imagen: Image.Image) -> list[Deteccion]:
+        bgr = cv2.cvtColor(np.array(imagen.convert("RGB")), cv2.COLOR_RGB2BGR)
+        H, W = bgr.shape[:2]
+        cajas = proponer_objetos_imagen(bgr)
+        dets = self.clasificar_cajas(bgr, cajas) if cajas else []
+        if not dets:  # un solo objeto que ocupa la imagen: se clasifica la imagen completa
+            clase, conf, _ = self.cnn.predecir([imagen])[0]
+            dets = [Deteccion((0, 0, W - 1, H - 1), clase, conf)]
         return dets
 
     # ----------------------------------------------------------------- dibujo
@@ -173,9 +174,9 @@ class SistemaResiduos:
         escala = max(0.5, img.shape[1] / 1600)
         for d in dets:
             x1, y1, x2, y2 = d.caja
-            color = d.info["color_bgr"]
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, grosor)
-            texto = f"{d.info['nombre']} ({d.info['tipo'][:3]}.) {d.conf_clase:.2f}"
+            cv2.rectangle(img, (x1, y1), (x2, y2), d.info["color_bgr"], grosor)
+            nombre = d.info["nombre"].replace("á", "a").replace("ó", "o")  # OpenCV no dibuja tildes
+            texto = f"{nombre} ({d.info['tipo'][:3]}.) {d.conf:.2f}"
             if d.track_id is not None:
                 texto = f"#{d.track_id} " + texto
             (tw, th), _ = cv2.getTextSize(texto, cv2.FONT_HERSHEY_SIMPLEX, escala, 2)
@@ -185,21 +186,20 @@ class SistemaResiduos:
         return img
 
     def procesar_imagen(self, imagen: Image.Image):
-        dets = self.detectar(imagen)
+        dets = self.detectar_imagen(imagen)
         bgr = cv2.cvtColor(np.array(imagen.convert("RGB")), cv2.COLOR_RGB2BGR)
-        anotada = cv2.cvtColor(self.dibujar(bgr, dets), cv2.COLOR_BGR2RGB)
-        return anotada, dets
+        return cv2.cvtColor(self.dibujar(bgr, dets), cv2.COLOR_BGR2RGB), dets
 
     # ------------------------------------------------------------------ video
-    def procesar_video(self, ruta_in: str, ruta_out: str, cada_n: int = 3,
+    def procesar_video(self, ruta_in: str, ruta_out: str, cada_n: int = 2,
                        max_segundos: float = 60, ancho_max: int = 960, progreso=None):
         import imageio.v2 as imageio
 
         cap = cv2.VideoCapture(ruta_in)
         fps = cap.get(cv2.CAP_PROP_FPS) or 25
         total = int(min(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1e9, fps * max_segundos))
-        writer = imageio.get_writer(ruta_out, fps=fps, codec="libx264", quality=7,
-                                    macro_block_size=1)
+        writer = imageio.get_writer(ruta_out, fps=fps, codec="libx264", quality=7, macro_block_size=1)
+        fondo = cv2.createBackgroundSubtractorMOG2(history=300, varThreshold=40, detectShadows=False)
         tracker, dets, i, t0 = Tracker(), [], 0, time.time()
         while i < total:
             ok, frame = cap.read()
@@ -208,28 +208,25 @@ class SistemaResiduos:
             if frame.shape[1] > ancho_max:
                 f = ancho_max / frame.shape[1]
                 frame = cv2.resize(frame, None, fx=f, fy=f)
+            H, W = frame.shape[:2]
+            mascara = fondo.apply(frame)
             if i % cada_n == 0:
-                pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                dets = self.detectar(pil)
+                cajas = _cajas_desde_mascara(mascara, W, H) if i > 5 else []
+                dets = self.clasificar_cajas(frame, cajas) if cajas else []
                 tracker.actualizar(dets)
             writer.append_data(cv2.cvtColor(self.dibujar(frame, dets), cv2.COLOR_BGR2RGB))
             i += 1
             if progreso and i % 10 == 0:
                 progreso(i / max(total, 1), desc=f"Procesando cuadro {i}/{total}")
         cap.release(); writer.close()
-        resumen = tracker.resumen()
-        return ruta_out, resumen, {"cuadros": i, "segundos": time.time() - t0}
+        return ruta_out, tracker.resumen(), {"cuadros": i, "segundos": time.time() - t0}
 
 
 def resumen_texto(conteo: Counter) -> str:
-    """Convierte un conteo de clases en texto para la app y para el asistente."""
     if not conteo:
         return "No se detectaron residuos."
-    lineas = []
-    for clase, n in conteo.most_common():
-        inf = INFO_CLASES[clase]
-        lineas.append(f"- {inf['nombre']}: {n} ({inf['tipo']}, caneca {inf['caneca']})")
+    lineas = [f"- {INFO_CLASES[c]['nombre']}: {n} ({INFO_CLASES[c]['tipo']}, caneca {INFO_CLASES[c]['caneca']})"
+              for c, n in conteo.most_common()]
     org = sum(n for c, n in conteo.items() if INFO_CLASES[c]["tipo"] == "Orgánico")
-    inorg = sum(conteo.values()) - org
-    lineas.append(f"Total: {sum(conteo.values())} objetos -> {org} orgánicos, {inorg} inorgánicos.")
+    lineas.append(f"Total: {sum(conteo.values())} objetos -> {org} orgánicos, {sum(conteo.values()) - org} inorgánicos.")
     return "\n".join(lineas)

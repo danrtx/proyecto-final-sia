@@ -32,16 +32,20 @@ def main():
     salida.parent.mkdir(exist_ok=True)
     w = imageio.get_writer(salida, fps=FPS, codec="libx264", quality=7, macro_block_size=8)
     base = fondo()
+    carriles = [100, 270, 440]           # y de cada carril
+    ultimo = {c: None for c in carriles}  # último objeto de cada carril
     for f in range(FPS * SEG):
         if f >= siguiente:
-            img = cv2.imread(str(archivos[k % len(archivos)])); k += 1
-            lado = random.randint(170, 230)
-            esc = lado / max(img.shape[:2])
-            img = cv2.resize(img, None, fx=esc, fy=esc)
-            carriles = [100, 300, 500 - img.shape[0] // 2]
-            y = min(random.choice(carriles) + random.randint(-10, 10), H - 95 - img.shape[0])
-            objetos.append([-img.shape[1], max(95, y), img])
-            siguiente = f + random.randint(18, 30)
+            libres = [c for c in carriles if ultimo[c] is None or ultimo[c][0] > 60]
+            if libres:
+                img = cv2.imread(str(archivos[k % len(archivos)])); k += 1
+                lado = random.randint(140, 170)
+                esc = lado / max(img.shape[:2])
+                img = cv2.resize(img, None, fx=esc, fy=esc)
+                y = random.choice(libres)
+                o = [-img.shape[1], y + random.randint(0, 10), img]
+                objetos.append(o); ultimo[y] = o
+            siguiente = f + random.randint(10, 18)
         frame = base.copy()
         for o in objetos:
             o[0] += VEL
