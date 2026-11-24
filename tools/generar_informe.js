@@ -7,53 +7,54 @@ const {
   Footer, PageNumber, PageBreak, TableOfContents,
 } = require("docx");
 
+// ---------------------------------------------------------------- métricas del Transformer
+const TR = JSON.parse(fs.readFileSync(path.join(__dirname, "metricas_transformer.json"), "utf8"));
+
 const RAIZ = path.resolve(__dirname, "..");
 const OUT = path.join(RAIZ, "outputs");
 const FONT = "Arial";
 const VERDE = "1E7B4A";
-const ANCHO = 9360; // ancho útil carta con márgenes de 1"
 
 // ---------------------------------------------------------------- helpers
-const p = (texto, opts = {}) => new Paragraph({
-  spacing: { after: 120, line: 300 }, alignment: opts.align ?? AlignmentType.JUSTIFIED,
-  ...opts.par,
-  children: (Array.isArray(texto) ? texto : [texto]).map(t =>
-    typeof t === "string" ? new TextRun({ text: t, ...opts.run }) : t),
-});
+const runs = (texto, extra = {}) => (Array.isArray(texto) ? texto : [texto]).map(t => typeof t === "string" ? new TextRun({ text: t, ...extra }) : t);
+const p = (texto, opts = {}) => new Paragraph({ spacing: { after: 120, line: 300 }, alignment: opts.align ?? AlignmentType.JUSTIFIED, children: runs(texto) });
 const b = t => new TextRun({ text: t, bold: true });
 const i = t => new TextRun({ text: t, italics: true });
 const h1 = t => new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun(t)] });
 const h2 = t => new Paragraph({ heading: HeadingLevel.HEADING_2, children: [new TextRun(t)] });
-const vineta = (texto, nivel = 0) => new Paragraph({
-  numbering: { reference: "vinetas", level: nivel }, spacing: { after: 60, line: 288 },
-  children: (Array.isArray(texto) ? texto : [texto]).map(t => typeof t === "string" ? new TextRun(t) : t),
-});
-const numerada = (texto, ref = "numeros") => new Paragraph({
-  numbering: { reference: ref, level: 0 }, spacing: { after: 60, line: 288 },
-  children: (Array.isArray(texto) ? texto : [texto]).map(t => typeof t === "string" ? new TextRun(t) : t),
-});
+const vineta = t => new Paragraph({ numbering: { reference: "vinetas", level: 0 }, spacing: { after: 60, line: 288 }, children: runs(t) });
+const numerada = (t, ref) => new Paragraph({ numbering: { reference: ref, level: 0 }, spacing: { after: 60, line: 288 }, children: runs(t) });
+const codigo = lineas => lineas.map((l, k) => new Paragraph({
+  spacing: { after: 0, line: 240 }, shading: { type: ShadingType.CLEAR, color: "auto", fill: "F3F5F4" },
+  indent: { left: 360 }, children: [new TextRun({ text: l || " ", font: "Consolas", size: 18 })] }));
 
+function tamano(archivo) {
+  const buf = fs.readFileSync(path.join(OUT, archivo));
+  if (archivo.endsWith(".png")) return [buf.readUInt32BE(16), buf.readUInt32BE(20)];
+  for (let k = 2; k < buf.length;) {  // JPEG: buscar marcador SOF
+    const m = buf[k + 1], len = buf.readUInt16BE(k + 2);
+    if (m >= 0xC0 && m <= 0xC3) return [buf.readUInt16BE(k + 7), buf.readUInt16BE(k + 5)];
+    k += 2 + len;
+  }
+}
 let nFig = 0, nTab = 0;
-function figura(archivo, anchoPx, altoPx, pie, anchoMax = 6.3) {
+function figura(archivo, pie, anchoIn = 6.3) {
   nFig++;
-  const ancho = Math.min(anchoMax, 6.5) * 96;
-  const alto = ancho * altoPx / anchoPx;
+  const [w, h] = tamano(archivo);
+  const ancho = Math.min(anchoIn, 6.5) * 96;
   return [
     new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 120, after: 60 }, keepNext: true,
-      children: [new ImageRun({ type: archivo.endsWith(".png") ? "png" : "jpg",
-        data: fs.readFileSync(path.join(OUT, archivo)),
-        transformation: { width: Math.round(ancho), height: Math.round(alto) },
+      children: [new ImageRun({ type: archivo.endsWith(".png") ? "png" : "jpg", data: fs.readFileSync(path.join(OUT, archivo)),
+        transformation: { width: Math.round(ancho), height: Math.round(ancho * h / w) },
         altText: { title: pie, description: pie, name: archivo } })] }),
     new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 200 },
       children: [new TextRun({ text: `Figura ${nFig}. `, bold: true, size: 20 }), new TextRun({ text: pie, italics: true, size: 20 })] }),
   ];
 }
-
 const borde = { style: BorderStyle.SINGLE, size: 4, color: "B7C9BE" };
 const bordes = { top: borde, bottom: borde, left: borde, right: borde };
 function tabla(titulo, encabezados, filas, anchos) {
   nTab++;
-  const total = anchos.reduce((a, c) => a + c, 0);
   const celda = (txt, j, enc, k) => new TableCell({
     width: { size: anchos[j], type: WidthType.DXA }, borders: bordes,
     shading: { type: ShadingType.CLEAR, color: "auto", fill: enc ? VERDE : (k % 2 ? "F1F7F3" : "FFFFFF") },
@@ -64,258 +65,249 @@ function tabla(titulo, encabezados, filas, anchos) {
   return [
     new Paragraph({ spacing: { before: 160, after: 80 }, keepNext: true,
       children: [new TextRun({ text: `Tabla ${nTab}. `, bold: true, size: 20 }), new TextRun({ text: titulo, italics: true, size: 20 })] }),
-    new Table({
-      width: { size: total, type: WidthType.DXA }, columnWidths: anchos,
-      rows: [new TableRow({ tableHeader: true, children: encabezados.map((e, j) => celda(e, j, true, 0)) }),
-        ...filas.map((f, k) => new TableRow({ children: f.map((c, j) => celda(c, j, false, k)) }))],
-    }),
+    new Table({ width: { size: anchos.reduce((a, c) => a + c, 0), type: WidthType.DXA }, columnWidths: anchos,
+      rows: [new TableRow({ tableHeader: true, cantSplit: true, children: encabezados.map((e, j) => celda(e, j, true, 0)) }),
+        ...filas.map((f, k) => new TableRow({ cantSplit: true, children: f.map((c, j) => celda(c, j, false, k)) }))] }),
     new Paragraph({ spacing: { after: 120 }, children: [] }),
   ];
 }
+const pct = x => (100 * x).toFixed(1).replace(".", ",") + " %";
 
 // ---------------------------------------------------------------- portada
+const centro = (t, size, extra = {}, after = 200) => new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after }, children: [new TextRun({ text: t, size, ...extra })] });
 const portada = [
   new Paragraph({ spacing: { before: 1800 }, children: [] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 120 },
-    children: [new TextRun({ text: "[NOMBRE DE LA UNIVERSIDAD]", bold: true, size: 26 })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 1000 },
-    children: [new TextRun({ text: "Sistemas de Inteligencia Artificial", size: 24 })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 200 },
-    children: [new TextRun({ text: "EcoVisión", bold: true, size: 56, color: VERDE })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 200 },
-    children: [new TextRun({ text: "Sistema inteligente de detección y clasificación de residuos basado en Transformers pre-entrenados", size: 30 })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 1400 },
-    children: [new TextRun({ text: "Proyecto final – Proyecto 4: Detección de residuos y clasificación de basura", italics: true, size: 24 })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 80 }, children: [new TextRun({ text: "Presentado por:", size: 22 })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 400 }, children: [new TextRun({ text: "Danilo Andrés Montezuma Ibarra", bold: true, size: 24 })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 80 }, children: [new TextRun({ text: "Docente:", size: 22 })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 1200 }, children: [new TextRun({ text: "PhD Cristian Camilo Ordoñez", bold: true, size: 24 })] }),
-  new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Noviembre de 2026", size: 22 })] }),
+  centro("[NOMBRE DE LA UNIVERSIDAD]", 26, { bold: true }, 120),
+  centro("Sistemas de Inteligencia Artificial", 24, {}, 1000),
+  centro("EcoVisión", 56, { bold: true, color: VERDE }),
+  centro("Sistema inteligente de detección y clasificación de residuos con una CNN y un Transformer construidos y entrenados desde cero", 30),
+  centro("Proyecto final – Proyecto 4: Detección de residuos y clasificación de basura", 24, { italics: true }, 1400),
+  centro("Presentado por:", 22, {}, 80),
+  centro("Danilo Andrés Montezuma Ibarra", 24, { bold: true }, 400),
+  centro("Docente:", 22, {}, 80),
+  centro("PhD Cristian Camilo Ordoñez", 24, { bold: true }, 1200),
+  centro("Noviembre de 2026", 22),
   new Paragraph({ children: [new PageBreak()] }),
 ];
 
 // ---------------------------------------------------------------- contenido
 const C = [];
-
 C.push(new Paragraph({ spacing: { before: 120, after: 200 }, children: [new TextRun({ text: "Tabla de contenido", bold: true, size: 30, color: VERDE })] }),
   new TableOfContents("Tabla de contenido", { hyperlink: true, headingStyleRange: "1-2" }),
   new Paragraph({ children: [new PageBreak()] }));
 
 C.push(h1("Resumen"),
-  p(["Este proyecto presenta ", b("EcoVisión"), ", un sistema de inteligencia artificial que detecta residuos en video, los clasifica por material (plástico, papel, cartón, vidrio y metal), los separa en orgánicos e inorgánicos, muestra el resultado en pantalla y ofrece un asistente conversacional con recomendaciones de separación. Todo el sistema se basa en ", b("modelos Transformer pre-entrenados"), " que se ejecutan localmente, sin depender de APIs externas."]),
-  p(["La solución combina tres tipos de Transformer: (1) ", b("OWLv2"), ", un detector de objetos de vocabulario abierto basado en Vision Transformer, que localiza los objetos en cada cuadro del video; (2) un ", b("Vision Transformer (ViT)"), " pre-entrenado en ImageNet-21k al que se le aplicó ", i("fine-tuning"), " con 5 510 imágenes de residuos y que alcanzó una ", b("exactitud del 97,0 % y un F1 macro de 0,969"), " en el conjunto de prueba; y (3) ", b("Qwen2.5-1.5B-Instruct"), ", un modelo de lenguaje tipo GPT (solo decodificador) que, apoyado en una base de conocimiento propia sobre la Resolución 2184 de 2019, responde en español las preguntas del usuario."]),
-  p([b("Palabras clave: "), "Transformer, mecanismo de atención, Vision Transformer, detección de objetos, fine-tuning, LLM, reciclaje, clasificación de residuos."]));
+  p(["Este proyecto presenta ", b("EcoVisión"), ", un sistema que detecta residuos en video, los clasifica por material (plástico, papel, cartón, vidrio, metal y orgánico), indica si son orgánicos o inorgánicos, muestra el resultado en pantalla y entrega retroalimentación sobre cómo separarlos. Los dos modelos de inteligencia artificial del sistema se ", b("diseñaron, programaron y entrenaron desde cero"), ": no se usó ningún modelo pre-entrenado, ni pesos descargados, ni APIs externas."]),
+  p(["El primer modelo es ", b("EcoNet"), ", una red neuronal convolucional (CNN) de 1,17 millones de parámetros entrenada con 4 601 imágenes. En el conjunto de prueba alcanzó una ", b("exactitud del 83,0 %"), " en las seis clases y del ", b("97,2 % al separar orgánicos de inorgánicos"), ". El segundo es ", b("EcoTransformer"), ", un Transformer codificador-decodificador implementado a mano a partir del artículo “Attention is All You Need”. Recibe la salida de la CNN y una pregunta opcional del usuario y genera la retroalimentación en español. Se entrenó con un dataset propio de 40 000 ejemplos y respondió correctamente el ", b(pct(TR.exacta_vistas)), " de los casos con plantillas conocidas y el ", b(pct(TR.exacta_nuevas)), " de los casos con frases que nunca vio (con la caneca correcta en el ", b(pct(TR.canecas_nuevas)), ")."]),
+  p([b("Palabras clave: "), "red neuronal convolucional, Transformer, mecanismo de atención, entrenamiento desde cero, clasificación de residuos, reciclaje."]));
 
 C.push(h1("1. Introducción"),
-  p("La separación de residuos en la fuente es uno de los pasos más importantes para que los materiales aprovechables lleguen a las cadenas de reciclaje. En Colombia, la Resolución 2184 de 2019 estableció un código de colores unificado (caneca blanca para aprovechables, verde para orgánicos y negra para no aprovechables). En la práctica, muchas personas no saben en qué caneca va cada residuo, y en las plantas de aprovechamiento la clasificación sigue haciéndose a mano sobre bandas transportadoras."),
-  p("La arquitectura Transformer, presentada en el artículo “Attention is All You Need” (Vaswani et al., 2017), revolucionó primero el procesamiento de lenguaje natural (BERT, GPT, T5) y luego la visión por computador (Vision Transformer). Este proyecto aplica esa misma arquitectura al problema de la clasificación de residuos y aprovecha el aprendizaje por transferencia: se parte de modelos que ya aprendieron representaciones generales con millones de datos y se adaptan a la tarea específica."));
-
-C.push(h2("1.1 Objetivo general"),
-  p("Construir un sistema inteligente basado en modelos Transformer pre-entrenados que identifique y clasifique residuos para facilitar los procesos de reciclaje."),
+  p("La separación de residuos en la fuente es clave para que los materiales aprovechables lleguen a las cadenas de reciclaje. En Colombia, la Resolución 2184 de 2019 unificó el código de colores: caneca blanca para aprovechables, verde para orgánicos y negra para no aprovechables. Aun así, muchas personas no saben en qué caneca va cada residuo, y en las plantas de aprovechamiento la clasificación sigue haciéndose a mano."),
+  p("Siguiendo la indicación del docente, el sistema se construyó con dos modelos propios, sin modelos pre-entrenados: una CNN que reconoce el residuo y un Transformer que toma la respuesta de la CNN y brinda retroalimentación. Así, el proyecto aplica dos de las arquitecturas centrales del aprendizaje profundo vistas en el curso: las redes convolucionales para visión y el Transformer con su mecanismo de atención."),
+  h2("1.1 Objetivo general"),
+  p("Construir desde cero un sistema inteligente, basado en una CNN y un Transformer propios, que identifique y clasifique residuos para facilitar los procesos de reciclaje."),
   h2("1.2 Objetivos específicos"),
-  numerada("Detectar los objetos presentes en un video."),
-  numerada("Clasificar los residuos en plástico, papel, cartón, vidrio y metal."),
-  numerada("Identificar si cada residuo es orgánico o inorgánico."),
-  numerada("Mostrar el resultado de la clasificación de forma visual e interpretable."),
-  numerada("Crear un asistente que brinde recomendaciones sobre la separación de residuos."));
+  numerada("Detectar los objetos presentes en un video.", "obj"),
+  numerada("Clasificar los residuos en plástico, papel, cartón, vidrio y metal.", "obj"),
+  numerada("Identificar si cada residuo es orgánico o inorgánico.", "obj"),
+  numerada("Mostrar el resultado de la clasificación.", "obj"),
+  numerada("Crear un asistente que brinde recomendaciones sobre la separación de residuos.", "obj"));
 
 C.push(h1("2. Marco teórico"),
-  h2("2.1 Arquitectura Transformer y mecanismo de atención"),
-  p("El Transformer reemplaza las redes recurrentes (RNN) y convolucionales (CNN) por un mecanismo de autoatención (self-attention), que permite que cada elemento de una secuencia se relacione directamente con todos los demás, sin importar la distancia entre ellos, y que el cálculo se haga en paralelo. Cada token se proyecta en tres vectores: consulta (Query, Q), clave (Key, K) y valor (Value, V). La atención se calcula como:"),
-  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 120, after: 160 },
-    children: [new TextRun({ text: "Attention(Q, K, V) = softmax( Q·Kᵀ / √dₖ ) · V", italics: true, size: 26 })] }),
-  p("donde Q·Kᵀ mide la similitud entre consultas y claves, √dₖ normaliza según la dimensión de las claves y softmax convierte los puntajes en una distribución de probabilidad. La atención multi-cabeza repite este cálculo en paralelo con distintas proyecciones para capturar diferentes tipos de relaciones."),
-  p("Según cómo se combinen sus bloques, hay tres familias de modelos: solo codificador (encoder, como BERT), especializados en comprender y clasificar; solo decodificador (decoder, como GPT), especializados en generar texto de forma autorregresiva; y codificador-decodificador (como T5 o BART). Este proyecto usa modelos de las dos primeras familias, además de un modelo multimodal de visión y texto."));
+  h2("2.1 Redes neuronales convolucionales (CNN)"),
+  p("Una CNN procesa imágenes con capas de convolución: filtros pequeños (por ejemplo, de 3×3) que se deslizan sobre la imagen y responden a patrones locales. Las primeras capas detectan bordes y colores; las más profundas combinan esos patrones en texturas y formas. Cada convolución suele ir seguida de normalización por lotes (BatchNorm), que estabiliza el entrenamiento, y de una función de activación ReLU, que introduce no linealidad. Las capas de agrupamiento (max pooling) reducen la resolución, lo que da invariancia a pequeños desplazamientos. Al final, un agrupamiento global y una capa lineal convierten los mapas de características en probabilidades para cada clase."),
+  h2("2.2 Arquitectura Transformer y mecanismo de atención"),
+  p("El Transformer (Vaswani et al., 2017) reemplaza las redes recurrentes por un mecanismo de autoatención: cada token de la secuencia se relaciona directamente con todos los demás, y el cálculo se hace en paralelo. Cada token se proyecta en tres vectores, consulta (Q), clave (K) y valor (V), y la atención se calcula así:"),
+  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 120, after: 160 }, children: [new TextRun({ text: "Attention(Q, K, V) = softmax( Q·Kᵀ / √dₖ ) · V", italics: true, size: 26 })] }),
+  p("El producto Q·Kᵀ mide la similitud entre consultas y claves; √dₖ escala los puntajes y softmax los convierte en probabilidades con las que se ponderan los valores. La atención multi-cabeza repite este cálculo en paralelo con distintas proyecciones. Como la atención no conoce el orden, se suma una codificación posicional sinusoidal a los embeddings."),
+  p("La arquitectura codificador-decodificador tiene dos partes. El codificador lee la secuencia de entrada y construye una representación contextual. El decodificador genera la salida palabra por palabra: con una auto-atención enmascarada que solo mira las palabras ya generadas, y con una atención cruzada que consulta la representación del codificador. Es la arquitectura que se usa en traducción automática, y en este proyecto “traduce” la salida de la CNN a una retroalimentación en lenguaje natural."),
+  h2("2.3 Tokenización"),
+  p("Antes de entrar al Transformer, el texto se divide en tokens (en este proyecto, palabras y signos de puntuación) y cada token se convierte en un número según un vocabulario construido a partir de los datos de entrenamiento. Las palabras que no están en el vocabulario se reemplazan por un token especial <unk>."),
+  h2("2.4 Visión por computador clásica para localizar objetos"),
+  p("Para localizar los objetos en movimiento se usa la sustracción de fondo MOG2 (Zivkovic, 2004), que modela cada píxel del fondo con una mezcla de gaussianas y marca como primer plano lo que se aparta de ese modelo. Luego, con operaciones morfológicas (apertura y cierre) y la búsqueda de contornos, se obtienen las cajas delimitadoras. Estas técnicas son algoritmos clásicos de OpenCV: no aprenden de datos ni usan modelos pre-entrenados."));
 
-C.push(h2("2.2 Vision Transformer (ViT)"),
-  p("El Vision Transformer (Dosovitskiy et al., 2021) aplica el Transformer directamente a imágenes. Una imagen de 224×224 píxeles se divide en 196 parches de 16×16, y cada parche se aplana y se proyecta como un “token”, igual que una palabra en una frase. Se suman embeddings de posición y se antepone un token especial [CLS], como en BERT. Tras 12 capas de autoatención, el vector final del token [CLS] alimenta la capa de clasificación. Es, por tanto, una arquitectura solo-codificador aplicada a visión."));
-
-C.push(h2("2.3 Detección de objetos con OWLv2"),
-  p("OWLv2 (Minderer et al., 2023), de Google, es un detector de vocabulario abierto (open-vocabulary). Combina un codificador de imagen ViT con un codificador de texto tipo CLIP, de modo que puede localizar objetos descritos con frases en lenguaje natural (por ejemplo, “a plastic bottle” o “a banana peel”) sin reentrenarse para cada clase. Por cada parche de la imagen predice una caja delimitadora y su similitud con cada consulta de texto."));
-
-C.push(h2("2.4 Modelos de lenguaje grandes (LLM) y recuperación de información"),
-  p("Un LLM es un Transformer solo-decodificador entrenado con grandes cantidades de texto para predecir el siguiente token. Qwen2.5-1.5B-Instruct, de Alibaba, tiene 1 540 millones de parámetros y fue ajustado para seguir instrucciones en varios idiomas, incluido el español. Para reducir las “alucinaciones” se usa una técnica de generación aumentada por recuperación (RAG): antes de responder, se buscan en una base de conocimiento los fragmentos relevantes para la pregunta y se incluyen en el contexto del modelo."));
-
-C.push(h2("2.5 Aprendizaje por transferencia y fine-tuning"),
-  p("Entrenar un Transformer desde cero exige millones de ejemplos y mucho cómputo. Con el aprendizaje por transferencia se parte de pesos pre-entrenados y se ajustan (fine-tuning) con un conjunto de datos pequeño y específico. Así, el modelo reutiliza lo que ya sabe de bordes, texturas y formas, y solo aprende a distinguir las nuevas clases."));
-
-// --------------------------------------------------------------- metodología
 C.push(h1("3. Metodología"),
-  h2("3.1 Arquitectura general del sistema"),
-  p("El sistema procesa el video cuadro por cuadro en cuatro etapas:"),
-  ...tabla("Etapas del sistema EcoVisión.",
-    ["Etapa", "Modelo / técnica", "Tipo de Transformer", "Función"],
-    [["1. Detección", "OWLv2 (google/owlv2-base-patch16-ensemble)", "ViT + codificador de texto", "Localiza los objetos en cada cuadro del video"],
-     ["2. Clasificación", "ViT afinado (vit-base-patch16-224-in21k)", "Solo codificador", "Asigna el material a cada objeto recortado"],
-     ["3. Reglas y seguimiento", "Mapeo de clases + tracker por IoU", "—", "Orgánico/inorgánico, caneca y conteo de objetos únicos"],
-     ["4. Asistente", "Qwen2.5-1.5B-Instruct + RAG", "Solo decodificador", "Recomendaciones de separación en español"]],
-    [1600, 2900, 2000, 2860]),
-  p(["Todos los modelos se descargan una sola vez desde Hugging Face y se ejecutan en el equipo local (GPU NVIDIA RTX 4050 de 6 GB) con las bibliotecas ", i("PyTorch"), " y ", i("transformers"), ". La interfaz se construyó con ", i("Gradio"), " y el video se procesa con ", i("OpenCV"), "."]));
+  h2("3.1 Arquitectura general"),
+  ...tabla("Componentes del sistema EcoVisión.",
+    ["Etapa", "Componente", "Construido por", "Función"],
+    [["1. Localización", "Sustracción de fondo MOG2 + contornos (OpenCV)", "Algoritmo clásico, sin entrenamiento", "Encuentra los objetos en cada cuadro del video"],
+     ["2. Clasificación", "EcoNet (CNN)", "Nosotros, desde cero", "Asigna el material a cada objeto"],
+     ["3. Reglas y seguimiento", "Tabla de la Res. 2184 + tracker por IoU", "Nosotros", "Orgánico/inorgánico, caneca y conteo de objetos únicos"],
+     ["4. Retroalimentación", "EcoTransformer (codificador-decodificador)", "Nosotros, desde cero", "Toma la salida de la CNN y genera las recomendaciones"]],
+    [1700, 2700, 2200, 2760]),
+  p(["Todo se implementó en Python con ", i("PyTorch"), " (solo como biblioteca de tensores y gradientes) y se ejecuta en un equipo con GPU NVIDIA RTX 4050 de 6 GB. La interfaz se construyó con ", i("Gradio"), "."]));
 
-C.push(h2("3.2 Conjunto de datos"),
-  p(["Se usó el conjunto público ", i("Garbage Classification"), " (12 clases, 15 515 imágenes). Las 8 clases pertinentes se reagruparon en las 6 requeridas: se unieron los tres tipos de vidrio (café, verde y blanco) y la clase ", i("biological"), " se convirtió en ", i("orgánico"), ". Para evitar desbalance, se tomaron como máximo 1 000 imágenes por clase y se dividieron de forma estratificada en 70 % entrenamiento, 15 % validación y 15 % prueba."]),
-  ...tabla("Distribución del conjunto de datos por clase.",
-    ["Clase", "Clase(s) original(es)", "Entrenamiento", "Validación", "Prueba", "Total"],
-    [["Cartón", "cardboard", 623, 134, 134, 891], ["Metal", "metal", 538, 115, 116, 769],
-     ["Orgánico", "biological", 689, 148, 148, 985], ["Papel", "paper", 700, 150, 150, 1000],
-     ["Plástico", "plastic", 605, 130, 130, 865], ["Vidrio", "brown/green/white-glass", 700, 150, 150, 1000],
-     ["Total", "", 3855, 827, 828, 5510]],
-    [1300, 2560, 1500, 1300, 1300, 1400]),
-  ...figura("ejemplos_dataset.png", 1920, 720, "Ejemplos del conjunto de entrenamiento."));
+C.push(h2("3.2 Conjunto de datos de imágenes"),
+  p(["Se usó el conjunto público ", i("Garbage Classification"), " (12 clases, 15 515 imágenes). Las 8 clases pertinentes se reagruparon en las 6 del proyecto: se unieron los tres tipos de vidrio y la clase ", i("biological"), " se convirtió en ", i("orgánico"), ". Se usaron todas las imágenes de esas clases (6 576) y se dividieron por clase en 70 % entrenamiento, 15 % validación y 15 % prueba. Como vidrio tiene el doble de imágenes que las demás clases, se usaron pesos por clase en la función de pérdida."]),
+  ...tabla("Distribución del conjunto de imágenes.",
+    ["Clase", "Clase(s) original(es)", "Entrenamiento", "Validación", "Prueba"],
+    [["Cartón", "cardboard", 623, 134, 134], ["Metal", "metal", 538, 115, 116], ["Orgánico", "biological", 689, 148, 148],
+     ["Papel", "paper", 735, 157, 158], ["Plástico", "plastic", 605, 130, 130], ["Vidrio", "brown/green/white-glass", 1411, 302, 303],
+     ["Total", "", 4601, 986, 989]],
+    [1500, 2860, 1700, 1650, 1650]),
+  ...figura("ejemplos_dataset.png", "Ejemplos del conjunto de entrenamiento."));
 
-C.push(h2("3.3 Fine-tuning del Vision Transformer"),
-  p(["Se partió de ", i("google/vit-base-patch16-224-in21k"), " (85,8 millones de parámetros, 12 capas y 12 cabezas de atención), pre-entrenado con 14 millones de imágenes de ImageNet-21k. Se reemplazó la cabeza de clasificación por una capa lineal de 6 salidas y se entrenó toda la red. Durante el entrenamiento se aplicó aumento de datos (recortes aleatorios, giros horizontales, rotaciones de ±15° y variaciones de brillo, contraste y saturación) para mejorar la generalización."]),
-  ...tabla("Hiperparámetros del entrenamiento.",
+C.push(h2("3.3 EcoNet: diseño de la CNN"),
+  p("EcoNet recibe imágenes de 128×128 píxeles y tiene cuatro bloques convolucionales. Cada bloque aplica dos veces la secuencia convolución 3×3, BatchNorm y ReLU, y termina con un max pooling que reduce la resolución a la mitad. El número de filtros se duplica en cada bloque (32, 64, 128 y 256). Al final, un agrupamiento promedio global, un dropout del 40 % y una capa lineal producen las 6 salidas. Todos los pesos se inicializan aleatoriamente (inicialización de Kaiming)."),
+  ...tabla("Arquitectura de EcoNet.",
+    ["Capa", "Operación", "Salida"],
+    [["Entrada", "Imagen RGB", "3 × 128 × 128"], ["Bloque 1", "2 × (Conv 3×3, 32 filtros + BN + ReLU) + MaxPool", "32 × 64 × 64"],
+     ["Bloque 2", "2 × (Conv 3×3, 64 filtros + BN + ReLU) + MaxPool", "64 × 32 × 32"], ["Bloque 3", "2 × (Conv 3×3, 128 filtros + BN + ReLU) + MaxPool", "128 × 16 × 16"],
+     ["Bloque 4", "2 × (Conv 3×3, 256 filtros + BN + ReLU) + MaxPool", "256 × 8 × 8"], ["Clasificador", "Global Average Pooling + Dropout 0,4 + Lineal", "6 clases"],
+     ["Total", "1 174 758 parámetros entrenables", ""]],
+    [1700, 5260, 2400]),
+  p("Como la red parte de cero y el conjunto de datos es pequeño, se aplicó un aumento de datos intenso: en cada época, cada imagen se recorta, se voltea, se rota y se le cambian el brillo, el contraste y la saturación de forma aleatoria. Esto evita que la red memorice las imágenes."),
+  ...figura("aumento_datos.png", "Una misma imagen con seis aumentos aleatorios distintos."),
+  ...tabla("Hiperparámetros del entrenamiento de EcoNet.",
     ["Parámetro", "Valor"],
-    [["Épocas", "5"], ["Tamaño de lote (batch)", "32"], ["Tasa de aprendizaje", "5×10⁻⁵ con calentamiento (10 %) y decaimiento coseno"],
-     ["Optimizador", "AdamW, weight decay 0,01"], ["Precisión", "Mixta (FP16)"], ["Función de pérdida", "Entropía cruzada"],
-     ["Selección del modelo", "Mejor F1 macro en validación"], ["Tiempo de entrenamiento", "5 min 20 s (RTX 4050)"]],
+    [["Épocas", "45"], ["Tamaño de lote", "64"], ["Optimizador", "AdamW (weight decay 5×10⁻⁴)"], ["Tasa de aprendizaje", "Máximo 2×10⁻³ con política One-Cycle"],
+     ["Función de pérdida", "Entropía cruzada con pesos por clase y label smoothing 0,1"], ["Precisión", "Mixta (FP16)"],
+     ["Selección del modelo", "Mejor F1 macro en validación"], ["Tiempo de entrenamiento", "41 minutos (RTX 4050)"]],
     [3600, 5760]));
 
-C.push(h2("3.4 Detección y clasificación en video"),
-  p("Para cada cuadro analizado se ejecuta el siguiente procedimiento:"),
-  numerada(["OWLv2 recibe la imagen y 20 consultas de texto (por ejemplo, “a plastic bottle”, “an aluminum can”, “a cardboard box”, “food waste”) y devuelve cajas con un puntaje de confianza; se conservan las que superan 0,20."], "pasos"),
-  numerada(["Se filtran las cajas: supresión de no máximos (NMS, IoU 0,4), eliminación de cajas muy pequeñas o que cubren casi toda la imagen, y una ", b("supresión por contención"), " que descarta cajas que están más del 75 % dentro de otra (por ejemplo, la boca de una botella)."], "pasos"),
-  numerada(["Cada caja se recorta y el ViT afinado predice su material. Si la confianza del ViT es menor que 0,55, se usa como respaldo el material sugerido por la consulta de texto del detector."], "pasos"),
-  numerada(["Con una tabla de reglas se asigna el tipo (orgánico o inorgánico) y la caneca según la Resolución 2184 de 2019, y se dibuja la caja con su etiqueta."], "pasos"),
-  numerada(["Un tracker por IoU asocia las detecciones entre cuadros y asigna un identificador a cada objeto, de modo que cada residuo se cuente una sola vez. Un objeto se cuenta cuando aparece en al menos 3 análisis."], "pasos"),
-  p("Para acelerar el proceso se analiza 1 de cada N cuadros (N configurable; por defecto 3) y las cajas se mantienen en los cuadros intermedios."));
+C.push(h2("3.4 Detección de objetos en video"),
+  p("Por cada cuadro del video:"),
+  numerada("La sustracción de fondo MOG2 genera una máscara con lo que se mueve respecto al fondo (los residuos sobre la banda).", "det"),
+  numerada("Una apertura morfológica elimina el ruido y un cierre une las partes de un mismo objeto. Luego se extraen los contornos y sus cajas delimitadoras, y se descartan las demasiado pequeñas o demasiado grandes. Las cajas que quedan casi completamente dentro de otra se fusionan.", "det"),
+  numerada("Cada caja se recorta y EcoNet predice su material. Las predicciones con confianza menor a 0,40 se descartan.", "det"),
+  numerada("Con la tabla de reglas se asignan el tipo (orgánico o inorgánico) y la caneca, y se dibuja la caja con su etiqueta.", "det"),
+  numerada("Un tracker por IoU asocia las detecciones entre cuadros y asigna un identificador a cada objeto. Al final, cada objeto se cuenta una vez con la clase que acumuló más confianza.", "det"),
+  p("Para imágenes sueltas y la webcam, el fondo se estima con el color mediano de los bordes de la imagen y se combina con detección de bordes (Canny). Si no se encuentra ningún objeto, se clasifica la imagen completa."));
 
-C.push(h2("3.5 Asistente de recomendaciones (EcoAsistente)"),
-  p("El asistente usa Qwen2.5-1.5B-Instruct cargado localmente en FP16. Su contexto se arma con tres fuentes:"),
-  vineta([b("Instrucciones del sistema: "), "rol de experto en reciclaje en Colombia, respuestas breves en español y la regla de no inventar procedimientos."]),
-  vineta([b("Recuperación (RAG): "), "una base de conocimiento propia con 15 fragmentos (botellas, vidrio roto, cartón, Tetra Pak, residuos peligrosos, compostaje, etc.). Por palabras clave se seleccionan los 3 fragmentos más relevantes para la pregunta."]),
-  vineta([b("Resultado de la visión: "), "el resumen de lo detectado en la última imagen o video, para que el asistente pueda responder sobre esos residuos."]),
-  p("Se usa decodificación determinista (greedy) para que las respuestas sean estables. El botón “Recomendaciones para la última detección” genera además una lista por material, construida directamente desde la tabla de reglas, y el LLM añade un consejo breve al final; así las indicaciones principales siempre son correctas."));
+C.push(h2("3.5 EcoTransformer: diseño del Transformer de retroalimentación"),
+  p("El Transformer recibe como entrada una secuencia de texto con la salida de la CNN y, opcionalmente, la pregunta del usuario. A partir de ella genera la retroalimentación:"),
+  ...codigo(["Entrada : det plastico 2 vidrio 1 sep que hago con esto",
+    "Salida  : Plástico (2): es inorgánico, va en la caneca blanca. Vacíalo, enjuágalo",
+    "          y aplástalo. Vidrio (1): es inorgánico, va en la caneca blanca. Vacío,",
+    "          sin tapa y con cuidado. Todo es aprovechable: llévalo limpio y seco a",
+    "          la caneca blanca."]),
+  p(" "),
+  p("Todos sus componentes se programaron a mano: el tokenizador por palabras, los embeddings, la codificación posicional sinusoidal, la atención multi-cabeza (con las proyecciones W_Q, W_K, W_V y W_O y la fórmula softmax(QKᵀ/√dₖ)·V), las capas del codificador y del decodificador (con la máscara causal), y la decodificación voraz (greedy) palabra por palabra."),
+  ...tabla("Hiperparámetros de EcoTransformer.",
+    ["Parámetro", "Valor"],
+    [["Capas del codificador / decodificador", "3 / 3"], ["Dimensión del modelo (d_modelo)", "128"], ["Cabezas de atención", "4 (dₖ = 32)"],
+     ["Dimensión de la red feed-forward", "512"], ["Vocabulario de entrada / salida", `${TR.vocab_src} / ${TR.vocab_tgt} tokens`], ["Parámetros", TR.parametros.toLocaleString("es-CO")],
+     ["Entrenamiento", `14 épocas, lote 128, AdamW + One-Cycle (máx. 10⁻³), ${TR.minutos} min`]],
+    [4200, 5160]));
 
-C.push(h2("3.6 Interfaz de usuario"),
-  p("La aplicación web local (Gradio) tiene cuatro pestañas:"),
-  vineta([b("Video: "), "se carga un video y se obtiene el video anotado, una tabla de residuos únicos por material, el tipo, la caneca y una recomendación."]),
-  vineta([b("Imagen: "), "el mismo análisis sobre una foto, con el detalle de cada objeto."]),
-  vineta([b("Webcam en vivo: "), "detección en tiempo real desde la cámara."]),
-  vineta([b("EcoAsistente: "), "chat con el asistente y botón de recomendaciones automáticas."]));
+C.push(h2("3.6 Dataset propio de retroalimentación"),
+  p("No existe un conjunto de datos público para esta tarea, así que se creó uno propio a partir de las normas de la Resolución 2184 de 2019. Cada ejemplo combina una salida simulada de la CNN (de 0 a 6 materiales, con su cantidad) con uno de tres tipos de pregunta:"),
+  vineta([b("Retroalimentación general "), "(sin pregunta, o “dame recomendaciones”, “¿en qué caneca va esto?”): una línea por material con su caneca, su tipo y cómo prepararlo, más un mensaje de cierre según haya orgánicos, inorgánicos o ambos."]),
+  vineta([b("Pregunta por material "), "(“¿dónde boto una lata de atún?”): el consejo para ese material, reconociendo sinónimos (lata, aluminio, frasco, cáscara, periódico…)."]),
+  vineta([b("Pregunta de conocimiento "), "(vidrio roto, caja de pizza con grasa, pilas, servilletas, compost, aceite usado, medicamentos, colores de las canecas, etc.): la respuesta de la base de conocimiento."]),
+  p(["Las preguntas se generan con plantillas, sinónimos, saludos y cortesías, y se obtuvieron 40 000 ejemplos de entrenamiento. Para medir la generalización, ", b("las dos últimas plantillas de cada tipo se excluyeron del entrenamiento"), " y se usaron solo en un conjunto de prueba aparte (“frases nuevas”)."]));
+
+C.push(h2("3.7 Interfaz de usuario"),
+  p("La aplicación web local (Gradio) tiene cuatro pestañas: Video (video anotado, tabla de residuos únicos y retroalimentación), Imagen (análisis de una foto con el detalle de cada objeto), Webcam en vivo (detección en tiempo real) y EcoAsistente (chat en el que el Transformer responde usando lo último que detectó la CNN)."));
 
 // --------------------------------------------------------------- resultados
 C.push(h1("4. Resultados"),
-  h2("4.1 Entrenamiento del clasificador"),
-  p("La pérdida de validación bajó de forma sostenida hasta la tercera época, que obtuvo el mejor F1 macro en validación (0,9694); ese fue el modelo que se guardó. En las épocas 4 y 5 la pérdida de entrenamiento siguió bajando mientras la de validación se estabilizó, señal de que más épocas no aportaban mejoras."),
-  ...tabla("Métricas por época (conjunto de validación).",
-    ["Época", "Pérdida entrenamiento", "Pérdida validación", "Exactitud", "F1 macro"],
-    [["1", "0,510", "0,449", "0,944", "0,943"], ["2", "0,216", "0,215", "0,967", "0,967"],
-     ["3 (mejor)", "0,132", "0,166", "0,970", "0,969"], ["4", "0,083", "0,149", "0,967", "0,967"],
-     ["5", "0,068", "0,152", "0,969", "0,968"]],
-    [1560, 2100, 2100, 1800, 1800]),
-  ...figura("curvas_entrenamiento.png", 1560, 480, "Curvas de pérdida y exactitud durante el entrenamiento."));
+  h2("4.1 Entrenamiento de EcoNet"),
+  p("Como la red parte de pesos aleatorios, la exactitud empezó cerca del 42 % y subió de forma sostenida durante las 45 épocas. La pérdida de validación siguió de cerca a la de entrenamiento, lo que indica que el aumento de datos y el dropout evitaron el sobreajuste. El mejor modelo se obtuvo en la época 44, y la curva seguía subiendo, así que más épocas probablemente mejorarían el resultado."),
+  ...tabla("Evolución del entrenamiento de EcoNet (validación).",
+    ["Época", "Pérdida entrenamiento", "Exactitud entrenamiento", "Pérdida validación", "Exactitud validación", "F1 macro"],
+    [["1", "1,585", "0,420", "1,399", "0,567", "0,525"], ["10", "1,200", "0,626", "1,351", "0,567", "0,582"], ["20", "1,045", "0,705", "1,021", "0,740", "0,732"],
+     ["30", "0,910", "0,777", "0,943", "0,801", "0,797"], ["40", "0,819", "0,824", "0,871", "0,836", "0,836"], ["44 (mejor)", "0,802", "0,835", "0,862", "0,842", "0,842"]],
+    [1300, 1700, 1700, 1600, 1600, 1460]),
+  ...figura("curvas_cnn.png", "Curvas de pérdida y exactitud de EcoNet."));
 
-C.push(h2("4.2 Evaluación en el conjunto de prueba"),
-  p(["Sobre las 828 imágenes de prueba, que el modelo nunca vio, el ViT afinado obtuvo una ", b("exactitud de 96,98 %"), " y un ", b("F1 macro de 0,969"), ". La clase orgánico, decisiva para separar orgánicos de inorgánicos, alcanzó un F1 de 0,993. La clase con menor desempeño fue plástico (F1 de 0,930): algunos envases plásticos transparentes se confunden con vidrio y metal por su brillo y transparencia."]),
-  ...tabla("Reporte de clasificación en el conjunto de prueba.",
-    ["Clase", "Precisión", "Exhaustividad (recall)", "F1", "Imágenes"],
-    [["Cartón", "1,000", "0,963", "0,981", "134"], ["Metal", "0,928", "1,000", "0,963", "116"],
-     ["Orgánico", "0,993", "0,993", "0,993", "148"], ["Papel", "0,986", "0,960", "0,973", "150"],
-     ["Plástico", "0,944", "0,915", "0,930", "130"], ["Vidrio", "0,961", "0,987", "0,974", "150"],
-     ["Promedio macro", "0,969", "0,970", "0,969", "828"]],
-    [2160, 1800, 2200, 1500, 1700]),
-  ...figura("matriz_confusion.png", 840, 720, "Matriz de confusión en el conjunto de prueba.", 4.2));
+C.push(h2("4.2 Evaluación de EcoNet en el conjunto de prueba"),
+  p(["Sobre las 989 imágenes de prueba, que la red nunca vio, EcoNet obtuvo una ", b("exactitud del 83,0 %"), " y un ", b("F1 macro de 0,832"), ". Para el objetivo de separar orgánicos de inorgánicos, la exactitud fue del ", b("97,2 %"), ". Las clases con mejor desempeño fueron cartón (F1 de 0,928) y orgánico (0,907). Las más difíciles fueron plástico (0,699) y metal (0,780): los envases plásticos brillantes o transparentes se confunden con metal y con vidrio."]),
+  ...tabla("Reporte de clasificación de EcoNet en el conjunto de prueba.",
+    ["Clase", "Precisión", "Exhaustividad", "F1", "Imágenes"],
+    [["Cartón", "0,946", "0,910", "0,928", "134"], ["Metal", "0,696", "0,888", "0,780", "116"], ["Orgánico", "0,895", "0,919", "0,907", "148"],
+     ["Papel", "0,892", "0,835", "0,863", "158"], ["Plástico", "0,630", "0,785", "0,699", "130"], ["Vidrio", "0,904", "0,746", "0,817", "303"],
+     ["Promedio macro", "0,827", "0,847", "0,832", "989"]],
+    [2160, 1800, 2000, 1700, 1700]),
+  ...figura("matriz_confusion_cnn.png", "Matriz de confusión de EcoNet en el conjunto de prueba.", 4.2),
+  ...figura("predicciones_cnn.png", "Predicciones de EcoNet sobre imágenes de prueba (verde: correcta; rojo: incorrecta)."));
 
-C.push(h2("4.3 Interpretación: mapas de atención"),
-  p("Para verificar que el Transformer toma decisiones con sentido, se calcularon mapas de atención con la técnica de attention rollout: se combina la atención del token [CLS] hacia los 196 parches a lo largo de las 12 capas. En la Figura 4 se ve que el modelo se fija en el objeto (la etiqueta de la botella, el cuerpo de la lata, la textura del cartón) y no en el fondo, lo que muestra directamente el mecanismo de autoatención."),
-  ...figura("mapas_atencion.png", 2160, 720, "Mapas de atención del ViT afinado (arriba: imagen y clase real; abajo: atención y predicción)."));
+C.push(h2("4.3 ¿Qué aprendió la CNN?"),
+  p("La Figura 6 muestra los 32 filtros de la primera capa, aprendidos desde cero: varios responden a bordes con distintas orientaciones y otros a colores específicos, igual que en las CNN descritas en la literatura. La Figura 7 muestra los mapas de activación de un bloque intermedio: cada canal resalta una parte distinta del objeto (contornos, zonas brillantes, texturas)."),
+  ...figura("filtros_cnn.png", "Filtros 3×3 aprendidos por la primera capa de EcoNet.", 4.5),
+  ...figura("activaciones_cnn.png", "Mapas de activación del bloque 2 de EcoNet."));
 
-C.push(h2("4.4 Detección en video"),
-  p("Para probar el sistema completo se generó un video de 20 segundos que simula una banda transportadora, con imágenes del conjunto de prueba que se desplazan por la escena. El sistema procesó los 500 cuadros en unos 27 segundos analizando 1 de cada 3 cuadros (18 segundos analizando 1 de cada 5) y dibujó para cada objeto su identificador de seguimiento, el material, si es orgánico o inorgánico y la confianza."),
-  ...figura("prueba_video_frame.jpg", 960, 540, "Cuadro del video procesado: cada residuo con su identificador, material, tipo y confianza."),
-  p("Durante las pruebas se identificaron y corrigieron dos problemas. El detector marcaba partes de un mismo objeto como objetos distintos (cajas anidadas), y el tracker contaba varias veces un objeto cuya detección aparecía y desaparecía. Con la supresión por contención y el umbral mínimo de apariciones, el conteo en el video de prueba (analizando 1 de cada 3 cuadros) bajó de 179 a 57 objetos, una cifra coherente con el contenido del video (varias imágenes contienen más de un objeto, como grupos de botellas o de frutas)."));
+C.push(h2("4.4 Evaluación de EcoTransformer"),
+  p(["El Transformer aprendió rápido: desde la segunda época la exactitud por token en validación llegó al 99,99 %. Para evaluarlo de forma exigente, se le pidió generar respuestas completas él solo, palabra por palabra, y se compararon con las esperadas."]),
+  ...tabla("Resultados de EcoTransformer en generación completa.",
+    ["Conjunto de prueba", "Coincidencia exacta", "Canecas correctas"],
+    [["Plantillas vistas, combinaciones nuevas (2 000)", pct(TR.exacta_vistas), pct(TR.canecas_vistas)],
+     ["Frases nunca vistas en el entrenamiento (2 000)", pct(TR.exacta_nuevas), pct(TR.canecas_nuevas)]],
+    [4560, 2400, 2400]),
+  p(["Con plantillas conocidas, el modelo reproduce la retroalimentación esperada: copia bien los materiales y las cantidades detectadas por la CNN y elige el mensaje de cierre correcto. Con frases nunca vistas acierta la respuesta exacta en el ", pct(TR.exacta_nuevas), " de los casos y la caneca correcta en el ", pct(TR.canecas_nuevas), ". Los errores aparecen sobre todo cuando la frase nueva contiene palabras fuera del vocabulario (<unk>), y entonces el modelo elige otra respuesta de la base de conocimiento."]),
+  ...figura("curvas_transformer.png", "Curvas de entrenamiento de EcoTransformer."),
+  p("La Figura 9 muestra la atención cruzada del decodificador. Al escribir “Plástico ( 3 )”, el modelo atiende a los tokens “plastico” y “3” de la entrada, es decir, a la salida de la CNN. Así se ve directamente cómo el Transformer “lee” la respuesta de la CNN para construir la retroalimentación."),
+  ...figura("atencion_transformer.png", "Atención cruzada codificador → decodificador de EcoTransformer.", 5.0));
 
-C.push(h2("4.5 Asistente"),
-  p("Se evaluó el asistente con preguntas típicas. Algunas respuestas obtenidas:"),
-  ...tabla("Ejemplos de respuestas del EcoAsistente.",
-    ["Pregunta", "Respuesta del asistente"],
-    [["¿Dónde boto una caja de pizza con grasa?", "Bota la caja de pizza con grasa en la caneca NEGRA."],
-     ["¿Qué hago con el vidrio roto?", "Recoge los trozos con escoba y recogedor, envuélvelos en papel periódico o en una caja de cartón, cierra bien, marca el paquete como 'VIDRIO ROTO – PELIGRO' y deposítalo en la caneca blanca."],
-     ["¿Dónde boto las pilas usadas?", "Lleva las pilas usadas a un punto de reciclaje autorizado. En Colombia, puedes encontrar estos servicios en locales de reciclaje, puntos de venta de electrodomésticos o en programas específicos como Pilas con el Ambiente o Punto Azul."],
-     ["¿Dónde boto una servilleta usada?", "Bota la servilleta usada en la caneca negra."]],
-    [3200, 6160]),
-  p("En una primera versión, el modelo de 1 500 millones de parámetros generaba a veces indicaciones incorrectas (por ejemplo, sugería aplastar el vidrio roto). Se corrigió priorizando los fragmentos recuperados según la pregunta, ampliando la base de conocimiento, endureciendo las instrucciones del sistema y usando decodificación determinista. Esto muestra la importancia del RAG para usar LLM pequeños en un dominio específico."));
+C.push(h2("4.5 Sistema completo en video"),
+  p("Para probar el sistema completo se generó un video de 20 segundos que simula una banda transportadora, con imágenes del conjunto de prueba. El sistema procesó los 500 cuadros en unos 14 segundos (analizando 1 de cada 2), dibujó cada objeto con su identificador, material, tipo y confianza, y el Transformer generó la retroalimentación a partir del conteo final."),
+  ...figura("cuadro_video_resultado.jpg", "Cuadro del video procesado: cada residuo con su identificador, material (EcoNet), tipo y confianza."),
+  p("En la figura se ven aciertos (cartón, orgánico, plástico) y también errores típicos de una red entrenada desde cero con pocos datos: una bandeja de aluminio clasificada como plástico o una revista como metal. Además, cuando dos objetos se tocan, la sustracción de fondo puede unirlos en una sola caja."));
 
 C.push(h1("5. Cumplimiento de los requisitos"),
-  ...tabla("Relación entre los requisitos del proyecto y la solución.",
-    ["Requisito", "Solución implementada", "Evidencia"],
-    [["Detectar objetos en video", "OWLv2 + tracker por IoU", "Video anotado con identificadores (sección 4.4)"],
-     ["Clasificar en plástico, papel, cartón, vidrio y metal", "ViT pre-entrenado con fine-tuning", "Exactitud 97,0 %, F1 0,969 (sección 4.2)"],
-     ["Identificar orgánicos e inorgánicos", "Clase orgánico + reglas de mapeo", "F1 0,993 en orgánico; etiqueta Org./Ino. en cada caja"],
-     ["Mostrar el resultado", "Aplicación Gradio con video, imagen y webcam", "Cajas, etiquetas, tablas y resumen"],
-     ["Asistente de recomendaciones", "Qwen2.5 local + RAG + resultado de la detección", "Respuestas en español (sección 4.5)"],
-     ["Modelo Transformer pre-entrenado, sin APIs", "ViT, OWLv2 y Qwen ejecutados localmente", "Funciona sin conexión tras la primera descarga"]],
-    [2800, 3360, 3200]));
+  ...tabla("Relación entre los requisitos y la solución.",
+    ["Requisito", "Solución", "Evidencia"],
+    [["Detectar objetos en video", "Sustracción de fondo + contornos + tracker", "Video anotado con identificadores (4.5)"],
+     ["Clasificar en plástico, papel, cartón, vidrio y metal", "EcoNet, CNN propia desde cero", "Exactitud 83,0 %, F1 0,832 (4.2)"],
+     ["Identificar orgánicos e inorgánicos", "Clase orgánico + reglas", "Exactitud 97,2 % orgánico vs. inorgánico"],
+     ["Mostrar el resultado", "Aplicación Gradio (video, imagen, webcam)", "Cajas, etiquetas y tablas"],
+     ["Asistente de recomendaciones", "EcoTransformer, Transformer propio desde cero", `Canecas correctas ${pct(TR.canecas_nuevas)} con frases nuevas (4.4)`],
+     ["CNN y Transformer construidos desde cero", "Arquitecturas programadas en PyTorch, pesos aleatorios", "Notebooks 01 y 02"]],
+    [2900, 3360, 3100]));
 
 C.push(h1("6. Limitaciones y trabajo futuro"),
-  vineta("El clasificador se entrenó con imágenes de un solo objeto sobre fondos sencillos. En escenas reales muy desordenadas (como la planta del conjunto WaRP) el desempeño puede bajar. Como mejora, se podría hacer fine-tuning de un detector Transformer de extremo a extremo (DETR o RT-DETR) con conjuntos de residuos anotados con cajas, como TACO o WaRP."),
-  vineta("OWLv2 depende de las consultas de texto: los objetos que no se parecen a ninguna consulta pueden pasar desapercibidos."),
-  vineta("El conteo en video usa un tracker sencillo por IoU; un tracker con predicción de movimiento (por ejemplo, ByteTrack) reduciría los conteos duplicados."),
-  vineta("El LLM de 1 500 millones de parámetros puede responder de forma imprecisa ante preguntas fuera de su base de conocimiento. Un modelo más grande o una base de conocimiento más amplia con búsqueda semántica por embeddings mejoraría las respuestas."),
-  vineta("Las clases “residuos no aprovechables” (caneca negra) y “residuos peligrosos” (pilas, electrónicos) no están en el clasificador; las atiende solo el asistente. Sería útil incorporarlas como clases visuales."));
+  vineta("La exactitud de EcoNet (83 %) es menor que la de los modelos pre-entrenados con millones de imágenes, lo esperable con 4 601 imágenes y entrenamiento desde cero. Más épocas, más datos (o datos propios capturados con la cámara del sistema) y arquitecturas residuales (ResNet) mejorarían el resultado."),
+  vineta("La localización por sustracción de fondo necesita cámara fija y objetos en movimiento, y puede unir objetos que se tocan. Un detector neuronal entrenado desde cero (por ejemplo, de tipo YOLO o CenterNet) con un conjunto anotado con cajas resolvería esto."),
+  vineta("El Transformer genera respuestas a partir de su dataset: no responde temas fuera de él y puede fallar con palabras desconocidas. Ampliar el dataset con más plantillas, sinónimos y preguntas reales de usuarios mejoraría su generalización."),
+  vineta("Los residuos no aprovechables (caneca negra) y los peligrosos (pilas, medicamentos) solo los atiende el Transformer por texto; sería útil agregarlos como clases visuales de la CNN."));
 
 C.push(h1("7. Conclusiones"),
-  vineta("La arquitectura Transformer, vista en clase en el contexto de NLP, se aplicó con éxito a visión por computador: el mismo mecanismo de autoatención que relaciona palabras permite relacionar los parches de una imagen."),
-  vineta("El aprendizaje por transferencia fue clave: con solo 3 855 imágenes de entrenamiento y 5 minutos de cómputo, el ViT pre-entrenado alcanzó una exactitud del 97 % en la clasificación de seis tipos de residuos."),
-  vineta("Combinar un detector de vocabulario abierto (OWLv2) con un clasificador especializado (ViT afinado) permitió detectar y clasificar varios residuos por cuadro de video sin anotar cajas delimitadoras."),
-  vineta("Los mapas de atención confirmaron que el modelo basa sus decisiones en el objeto y no en el fondo, lo que aporta interpretabilidad al sistema."),
-  vineta("Un LLM pequeño ejecutado localmente puede servir como asistente útil si se le da información confiable (RAG) y se restringe su generación; sin estas medidas tiende a inventar indicaciones."),
-  vineta("El sistema cumple los cinco requisitos del proyecto y funciona completamente en un computador personal, sin APIs externas."));
+  vineta("Se construyó un sistema completo de detección, clasificación y retroalimentación sobre residuos con dos modelos diseñados y entrenados desde cero, sin modelos pre-entrenados ni APIs."),
+  vineta("EcoNet, con 1,17 millones de parámetros, alcanzó un 83 % de exactitud en seis clases y un 97 % al separar orgánicos de inorgánicos, que es la decisión más importante para el usuario."),
+  vineta("Implementar el Transformer a mano permitió entender en la práctica la atención Q·K·V, las máscaras, la codificación posicional y la arquitectura codificador-decodificador. El mapa de atención cruzada muestra cómo el decodificador consulta la salida de la CNN para generar cada parte de la respuesta."),
+  vineta("La combinación de visión por computador clásica (para localizar), una CNN (para reconocer) y un Transformer (para comunicar el resultado en lenguaje natural) resolvió los cinco requisitos del proyecto en un computador personal."),
+  vineta("La diferencia frente a los modelos pre-entrenados muestra el valor del pre-entrenamiento con grandes volúmenes de datos, y también que con datos bien preparados, aumento de datos y una arquitectura adecuada se logran resultados útiles desde cero."));
 
 C.push(h1("Referencias"),
-  ...[
-    "Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł. y Polosukhin, I. (2017). Attention is all you need. Advances in Neural Information Processing Systems, 30.",
-    "Dosovitskiy, A., Beyer, L., Kolesnikov, A., Weissenborn, D., Zhai, X., Unterthiner, T., … Houlsby, N. (2021). An image is worth 16x16 words: Transformers for image recognition at scale. International Conference on Learning Representations (ICLR).",
-    "Minderer, M., Gritsenko, A. y Houlsby, N. (2023). Scaling open-vocabulary object detection. Advances in Neural Information Processing Systems, 36.",
-    "Devlin, J., Chang, M.-W., Lee, K. y Toutanova, K. (2019). BERT: Pre-training of deep bidirectional transformers for language understanding. NAACL-HLT.",
-    "Brown, T. B., Mann, B., Ryder, N., et al. (2020). Language models are few-shot learners. Advances in Neural Information Processing Systems, 33.",
-    "Qwen Team (2024). Qwen2.5 technical report. arXiv:2412.15115.",
-    "Lewis, P., Perez, E., Piktus, A., et al. (2020). Retrieval-augmented generation for knowledge-intensive NLP tasks. Advances in Neural Information Processing Systems, 33.",
-    "Abnar, S. y Zuidema, W. (2020). Quantifying attention flow in transformers. Proceedings of ACL.",
+  ...["Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, Ł. y Polosukhin, I. (2017). Attention is all you need. Advances in Neural Information Processing Systems, 30.",
+    "LeCun, Y., Bottou, L., Bengio, Y. y Haffner, P. (1998). Gradient-based learning applied to document recognition. Proceedings of the IEEE, 86(11), 2278–2324.",
+    "Simonyan, K. y Zisserman, A. (2015). Very deep convolutional networks for large-scale image recognition. International Conference on Learning Representations (ICLR).",
+    "Ioffe, S. y Szegedy, C. (2015). Batch normalization: Accelerating deep network training by reducing internal covariate shift. International Conference on Machine Learning (ICML).",
+    "He, K., Zhang, X., Ren, S. y Sun, J. (2015). Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification. IEEE International Conference on Computer Vision (ICCV).",
+    "Smith, L. N. y Topin, N. (2019). Super-convergence: Very fast training of neural networks using large learning rates. Artificial Intelligence and Machine Learning for Multi-Domain Operations Applications, SPIE.",
+    "Zivkovic, Z. (2004). Improved adaptive Gaussian mixture model for background subtraction. International Conference on Pattern Recognition (ICPR).",
+    "Goodfellow, I., Bengio, Y. y Courville, A. (2016). Deep Learning. MIT Press.",
     "Tunstall, L., von Werra, L. y Wolf, T. (2022). Natural Language Processing with Transformers. O’Reilly Media.",
     "Mohamed, M. (2021). Garbage Classification (12 classes) [Conjunto de datos]. Kaggle.",
-    "Ministerio de Ambiente y Desarrollo Sostenible (2019). Resolución 2184 de 2019, por la cual se modifica la Resolución 668 de 2016 y se adoptan otras disposiciones. Bogotá, Colombia.",
-  ].map(r => new Paragraph({ spacing: { after: 100, line: 276 }, indent: { left: 720, hanging: 720 },
-    children: [new TextRun({ text: r, size: 21 })] })));
+    "Ministerio de Ambiente y Desarrollo Sostenible (2019). Resolución 2184 de 2019. Bogotá, Colombia.",
+  ].map(r => new Paragraph({ spacing: { after: 100, line: 276 }, indent: { left: 720, hanging: 720 }, children: [new TextRun({ text: r, size: 21 })] })));
 
 // --------------------------------------------------------------- documento
+const lista = ref => ({ reference: ref, levels: [{ level: 0, format: ref === "vinetas" ? LevelFormat.BULLET : LevelFormat.DECIMAL,
+  text: ref === "vinetas" ? "•" : "%1.", alignment: AlignmentType.LEFT, style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] });
+const pagina = { size: { width: 12240, height: 15840 }, margin: { top: 1440, bottom: 1440, left: 1440, right: 1440 } };
 const doc = new Document({
-  creator: "Danilo Andrés Montezuma Ibarra",
-  title: "EcoVisión – Informe del proyecto final",
+  creator: "Danilo Andrés Montezuma Ibarra", title: "EcoVisión – Informe del proyecto final",
   features: { updateFields: true },
   styles: {
     default: { document: { run: { font: FONT, size: 22 } } },
     paragraphStyles: [
       { id: "Heading1", name: "Heading 1", basedOn: "Normal", next: "Normal", quickFormat: true,
-        run: { font: FONT, size: 30, bold: true, color: VERDE },
-        paragraph: { spacing: { before: 360, after: 160 }, keepNext: true, outlineLevel: 0 } },
+        run: { font: FONT, size: 30, bold: true, color: VERDE }, paragraph: { spacing: { before: 360, after: 160 }, keepNext: true, outlineLevel: 0 } },
       { id: "Heading2", name: "Heading 2", basedOn: "Normal", next: "Normal", quickFormat: true,
-        run: { font: FONT, size: 25, bold: true, color: "2B2B2B" },
-        paragraph: { spacing: { before: 240, after: 120 }, keepNext: true, outlineLevel: 1 } },
+        run: { font: FONT, size: 25, bold: true, color: "2B2B2B" }, paragraph: { spacing: { before: 240, after: 120 }, keepNext: true, outlineLevel: 1 } },
     ],
   },
-  numbering: { config: [
-    { reference: "vinetas", levels: [{ level: 0, format: LevelFormat.BULLET, text: "•", alignment: AlignmentType.LEFT,
-      style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] },
-    { reference: "pasos", levels: [{ level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.LEFT,
-      style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] },
-    { reference: "numeros", levels: [{ level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.LEFT,
-      style: { paragraph: { indent: { left: 720, hanging: 360 } } } }] },
-  ] },
+  numbering: { config: [lista("vinetas"), lista("obj"), lista("det")] },
   sections: [
-    { properties: { page: { size: { width: 12240, height: 15840 }, margin: { top: 1440, bottom: 1440, left: 1440, right: 1440 } } },
-      children: portada },
-    { properties: { page: { size: { width: 12240, height: 15840 }, margin: { top: 1440, bottom: 1440, left: 1440, right: 1440 },
-        pageNumbers: { start: 1 } } },
-      footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER,
-        children: [new TextRun({ text: "EcoVisión – Proyecto final de Sistemas de Inteligencia Artificial · ", size: 18, color: "777777" }),
-          new TextRun({ children: [PageNumber.CURRENT], size: 18, color: "777777" })] })] }) },
+    { properties: { page: pagina }, children: portada },
+    { properties: { page: { ...pagina, pageNumbers: { start: 1 } } },
+      footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [
+        new TextRun({ text: "EcoVisión – Proyecto final de Sistemas de Inteligencia Artificial · ", size: 18, color: "777777" }),
+        new TextRun({ children: [PageNumber.CURRENT], size: 18, color: "777777" })] })] }) },
       children: C },
   ],
 });
-
 const destino = path.join(RAIZ, "informe", "Informe_Proyecto_Final_EcoVision.docx");
 fs.mkdirSync(path.dirname(destino), { recursive: true });
 Packer.toBuffer(doc).then(buf => { fs.writeFileSync(destino, buf); console.log("Informe creado:", destino); });
