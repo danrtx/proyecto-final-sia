@@ -9,6 +9,12 @@ const {
 
 // ---------------------------------------------------------------- métricas del Transformer
 const TR = JSON.parse(fs.readFileSync(path.join(__dirname, "metricas_transformer.json"), "utf8"));
+const CNN = JSON.parse(fs.readFileSync(path.join(__dirname, "metricas_cnn.json"), "utf8"));
+const f3 = x => x.toFixed(3).replace(".", ",");
+const R = CNN.reporte, E = CNN.epocas;
+const CLASES_R = ["Cartón", "Metal", "Orgánico", "Papel", "Plástico", "Vidrio"];
+const porF1 = [...CLASES_R].sort((a, b) => R[b][2] - R[a][2]);
+const ACC45 = 0.8301;  // primera corrida (45 épocas), como referencia
 
 const RAIZ = path.resolve(__dirname, "..");
 const OUT = path.join(RAIZ, "outputs");
@@ -98,7 +104,7 @@ C.push(new Paragraph({ spacing: { before: 120, after: 200 }, children: [new Text
 
 C.push(h1("Resumen"),
   p(["Este proyecto presenta ", b("EcoVisión"), ", un sistema que detecta residuos en video, los clasifica por material (plástico, papel, cartón, vidrio, metal y orgánico), indica si son orgánicos o inorgánicos, muestra el resultado en pantalla y entrega retroalimentación sobre cómo separarlos. Los dos modelos de inteligencia artificial del sistema se ", b("diseñaron, programaron y entrenaron desde cero"), ": no se usó ningún modelo pre-entrenado, ni pesos descargados, ni APIs externas."]),
-  p(["El primer modelo es ", b("EcoNet"), ", una red neuronal convolucional (CNN) de 1,17 millones de parámetros entrenada con 4 601 imágenes. En el conjunto de prueba alcanzó una ", b("exactitud del 83,0 %"), " en las seis clases y del ", b("97,2 % al separar orgánicos de inorgánicos"), ". El segundo es ", b("EcoTransformer"), ", un Transformer codificador-decodificador implementado a mano a partir del artículo “Attention is All You Need”. Recibe la salida de la CNN y una pregunta opcional del usuario y genera la retroalimentación en español. Se entrenó con un dataset propio de 40 000 ejemplos y respondió correctamente el ", b(pct(TR.exacta_vistas)), " de los casos con plantillas conocidas y el ", b(pct(TR.exacta_nuevas)), " de los casos con frases que nunca vio (con la caneca correcta en el ", b(pct(TR.canecas_nuevas)), ")."]),
+  p(["El primer modelo es ", b("EcoNet"), ", una red neuronal convolucional (CNN) de 1,17 millones de parámetros entrenada con 4 601 imágenes. En el conjunto de prueba alcanzó una ", b("exactitud del " + pct(CNN.acc_test)), " en las seis clases y del ", b(pct(CNN.acc_tipo) + " al separar orgánicos de inorgánicos"), ". El segundo es ", b("EcoTransformer"), ", un Transformer codificador-decodificador implementado a mano a partir del artículo “Attention is All You Need”. Recibe la salida de la CNN y una pregunta opcional del usuario y genera la retroalimentación en español. Se entrenó con un dataset propio de 40 000 ejemplos y respondió correctamente el ", b(pct(TR.exacta_vistas)), " de los casos con plantillas conocidas y el ", b(pct(TR.exacta_nuevas)), " de los casos con frases que nunca vio (con la caneca correcta en el ", b(pct(TR.canecas_nuevas)), ")."]),
   p([b("Palabras clave: "), "red neuronal convolucional, Transformer, mecanismo de atención, entrenamiento desde cero, clasificación de residuos, reciclaje."]));
 
 C.push(h1("1. Introducción"),
@@ -160,9 +166,9 @@ C.push(h2("3.3 EcoNet: diseño de la CNN"),
   ...figura("aumento_datos.png", "Una misma imagen con seis aumentos aleatorios distintos."),
   ...tabla("Hiperparámetros del entrenamiento de EcoNet.",
     ["Parámetro", "Valor"],
-    [["Épocas", "45"], ["Tamaño de lote", "64"], ["Optimizador", "AdamW (weight decay 5×10⁻⁴)"], ["Tasa de aprendizaje", "Máximo 2×10⁻³ con política One-Cycle"],
+    [["Épocas", String(CNN.epocas_total)], ["Tamaño de lote", "64"], ["Optimizador", "AdamW (weight decay 5×10⁻⁴)"], ["Tasa de aprendizaje", "Máximo 2×10⁻³ con política One-Cycle"],
      ["Función de pérdida", "Entropía cruzada con pesos por clase y label smoothing 0,1"], ["Precisión", "Mixta (FP16)"],
-     ["Selección del modelo", "Mejor F1 macro en validación"], ["Tiempo de entrenamiento", "41 minutos (RTX 4050)"]],
+     ["Selección del modelo", "Mejor F1 macro en validación"], ["Tiempo de entrenamiento", `${Math.round(CNN.minutos)} minutos (RTX 4050, carga de datos en 6 procesos)`]],
     [3600, 5760]));
 
 C.push(h2("3.4 Detección de objetos en video"),
@@ -203,21 +209,20 @@ C.push(h2("3.7 Interfaz de usuario"),
 // --------------------------------------------------------------- resultados
 C.push(h1("4. Resultados"),
   h2("4.1 Entrenamiento de EcoNet"),
-  p("Como la red parte de pesos aleatorios, la exactitud empezó cerca del 42 % y subió de forma sostenida durante las 45 épocas. La pérdida de validación siguió de cerca a la de entrenamiento, lo que indica que el aumento de datos y el dropout evitaron el sobreajuste. El mejor modelo se obtuvo en la época 44, y la curva seguía subiendo, así que más épocas probablemente mejorarían el resultado."),
+  p(`Como la red parte de pesos aleatorios, la exactitud de entrenamiento empezó cerca del ${Math.round(100 * E[1][1])} % y subió de forma sostenida durante las ${CNN.epocas_total} épocas. Al final la brecha entre entrenamiento y validación fue pequeña (exactitud de ${pct(E[CNN.epocas_total][1])} frente a ${pct(E[CNN.epocas_total][3])}): el aumento de datos y el dropout mantuvieron controlado el sobreajuste. El mejor modelo se obtuvo en la época ${CNN.mejor_epoca}. En una primera corrida de 45 épocas la exactitud en prueba fue del ${pct(ACC45)}; al entrenar ${CNN.epocas_total} épocas pasó al ${pct(CNN.acc_test)}.`),
   ...tabla("Evolución del entrenamiento de EcoNet (validación).",
     ["Época", "Pérdida entrenamiento", "Exactitud entrenamiento", "Pérdida validación", "Exactitud validación", "F1 macro"],
-    [["1", "1,585", "0,420", "1,399", "0,567", "0,525"], ["10", "1,200", "0,626", "1,351", "0,567", "0,582"], ["20", "1,045", "0,705", "1,021", "0,740", "0,732"],
-     ["30", "0,910", "0,777", "0,943", "0,801", "0,797"], ["40", "0,819", "0,824", "0,871", "0,836", "0,836"], ["44 (mejor)", "0,802", "0,835", "0,862", "0,842", "0,842"]],
+    [...new Set([1, 10, 20, 40, 60, 80, CNN.epocas_total, CNN.mejor_epoca])].filter(e => E[e]).sort((a, b) => a - b)
+      .map(e => [e === CNN.mejor_epoca ? `${e} (mejor)` : String(e), ...E[e].map(f3)]),
     [1300, 1700, 1700, 1600, 1600, 1460]),
   ...figura("curvas_cnn.png", "Curvas de pérdida y exactitud de EcoNet."));
 
 C.push(h2("4.2 Evaluación de EcoNet en el conjunto de prueba"),
-  p(["Sobre las 989 imágenes de prueba, que la red nunca vio, EcoNet obtuvo una ", b("exactitud del 83,0 %"), " y un ", b("F1 macro de 0,832"), ". Para el objetivo de separar orgánicos de inorgánicos, la exactitud fue del ", b("97,2 %"), ". Las clases con mejor desempeño fueron cartón (F1 de 0,928) y orgánico (0,907). Las más difíciles fueron plástico (0,699) y metal (0,780): los envases plásticos brillantes o transparentes se confunden con metal y con vidrio."]),
+  p(["Sobre las 989 imágenes de prueba, que la red nunca vio, EcoNet obtuvo una ", b("exactitud del " + pct(CNN.acc_test)), " y un ", b("F1 macro de " + f3(CNN.f1_test)), ". Para el objetivo de separar orgánicos de inorgánicos, la exactitud fue del ", b(pct(CNN.acc_tipo)), `. Las clases con mejor desempeño fueron ${porF1[0].toLowerCase()} (F1 de ${f3(R[porF1[0]][2])}) y ${porF1[1].toLowerCase()} (${f3(R[porF1[1]][2])}); las más difíciles fueron ${porF1[5].toLowerCase()} (${f3(R[porF1[5]][2])}) y ${porF1[4].toLowerCase()} (${f3(R[porF1[4]][2])}). Los envases plásticos brillantes o transparentes se confunden con metal y con vidrio.`]),
   ...tabla("Reporte de clasificación de EcoNet en el conjunto de prueba.",
     ["Clase", "Precisión", "Exhaustividad", "F1", "Imágenes"],
-    [["Cartón", "0,946", "0,910", "0,928", "134"], ["Metal", "0,696", "0,888", "0,780", "116"], ["Orgánico", "0,895", "0,919", "0,907", "148"],
-     ["Papel", "0,892", "0,835", "0,863", "158"], ["Plástico", "0,630", "0,785", "0,699", "130"], ["Vidrio", "0,904", "0,746", "0,817", "303"],
-     ["Promedio macro", "0,827", "0,847", "0,832", "989"]],
+    [...CLASES_R.map(c => [c, f3(R[c][0]), f3(R[c][1]), f3(R[c][2]), String(R[c][3])]),
+     ["Promedio macro", f3(R["macro avg"][0]), f3(R["macro avg"][1]), f3(R["macro avg"][2]), String(R["macro avg"][3])]],
     [2160, 1800, 2000, 1700, 1700]),
   ...figura("matriz_confusion_cnn.png", "Matriz de confusión de EcoNet en el conjunto de prueba.", 4.2),
   ...figura("predicciones_cnn.png", "Predicciones de EcoNet sobre imágenes de prueba (verde: correcta; rojo: incorrecta)."));
@@ -240,30 +245,30 @@ C.push(h2("4.4 Evaluación de EcoTransformer"),
   ...figura("atencion_transformer.png", "Atención cruzada codificador → decodificador de EcoTransformer.", 5.0));
 
 C.push(h2("4.5 Sistema completo en video"),
-  p("Para probar el sistema completo se generó un video de 20 segundos que simula una banda transportadora, con imágenes del conjunto de prueba. El sistema procesó los 500 cuadros en unos 14 segundos (analizando 1 de cada 2), dibujó cada objeto con su identificador, material, tipo y confianza, y el Transformer generó la retroalimentación a partir del conteo final."),
+  p("Para probar el sistema completo se generó un video de 20 segundos que simula una banda transportadora, con imágenes del conjunto de prueba. El sistema procesó los 500 cuadros en unos 17 segundos (analizando 1 de cada 2), dibujó cada objeto con su identificador, material, tipo y confianza, y el Transformer generó la retroalimentación a partir del conteo final."),
   ...figura("cuadro_video_resultado.jpg", "Cuadro del video procesado: cada residuo con su identificador, material (EcoNet), tipo y confianza."),
-  p("En la figura se ven aciertos (cartón, orgánico, plástico) y también errores típicos de una red entrenada desde cero con pocos datos: una bandeja de aluminio clasificada como plástico o una revista como metal. Además, cuando dos objetos se tocan, la sustracción de fondo puede unirlos en una sola caja."));
+  p("En la figura se ven aciertos (cartón, orgánico, plástico, la bandeja metálica como metal y el vaso como vidrio) y también un error típico de una red entrenada desde cero con pocos datos: una revista clasificada como metal. Además, cuando dos objetos quedan muy cerca, la sustracción de fondo puede unirlos en una sola caja (la manzana y la botella de vidrio)."));
 
 C.push(h1("5. Cumplimiento de los requisitos"),
   ...tabla("Relación entre los requisitos y la solución.",
     ["Requisito", "Solución", "Evidencia"],
     [["Detectar objetos en video", "Sustracción de fondo + contornos + tracker", "Video anotado con identificadores (4.5)"],
-     ["Clasificar en plástico, papel, cartón, vidrio y metal", "EcoNet, CNN propia desde cero", "Exactitud 83,0 %, F1 0,832 (4.2)"],
-     ["Identificar orgánicos e inorgánicos", "Clase orgánico + reglas", "Exactitud 97,2 % orgánico vs. inorgánico"],
+     ["Clasificar en plástico, papel, cartón, vidrio y metal", "EcoNet, CNN propia desde cero", `Exactitud ${pct(CNN.acc_test)}, F1 ${f3(CNN.f1_test)} (4.2)`],
+     ["Identificar orgánicos e inorgánicos", "Clase orgánico + reglas", `Exactitud ${pct(CNN.acc_tipo)} orgánico vs. inorgánico`],
      ["Mostrar el resultado", "Aplicación Gradio (video, imagen, webcam)", "Cajas, etiquetas y tablas"],
      ["Asistente de recomendaciones", "EcoTransformer, Transformer propio desde cero", `Canecas correctas ${pct(TR.canecas_nuevas)} con frases nuevas (4.4)`],
      ["CNN y Transformer construidos desde cero", "Arquitecturas programadas en PyTorch, pesos aleatorios", "Notebooks 01 y 02"]],
     [2900, 3360, 3100]));
 
 C.push(h1("6. Limitaciones y trabajo futuro"),
-  vineta("La exactitud de EcoNet (83 %) es menor que la de los modelos pre-entrenados con millones de imágenes, lo esperable con 4 601 imágenes y entrenamiento desde cero. Más épocas, más datos (o datos propios capturados con la cámara del sistema) y arquitecturas residuales (ResNet) mejorarían el resultado."),
+  vineta(`La exactitud de EcoNet (${Math.round(100 * CNN.acc_test)} %) es menor que la de los modelos pre-entrenados con millones de imágenes, lo esperable con 4 601 imágenes y entrenamiento desde cero. Más épocas, más datos (o datos propios capturados con la cámara del sistema) y arquitecturas residuales (ResNet) mejorarían el resultado.`),
   vineta("La localización por sustracción de fondo necesita cámara fija y objetos en movimiento, y puede unir objetos que se tocan. Un detector neuronal entrenado desde cero (por ejemplo, de tipo YOLO o CenterNet) con un conjunto anotado con cajas resolvería esto."),
   vineta("El Transformer genera respuestas a partir de su dataset: no responde temas fuera de él y puede fallar con palabras desconocidas. Ampliar el dataset con más plantillas, sinónimos y preguntas reales de usuarios mejoraría su generalización."),
   vineta("Los residuos no aprovechables (caneca negra) y los peligrosos (pilas, medicamentos) solo los atiende el Transformer por texto; sería útil agregarlos como clases visuales de la CNN."));
 
 C.push(h1("7. Conclusiones"),
   vineta("Se construyó un sistema completo de detección, clasificación y retroalimentación sobre residuos con dos modelos diseñados y entrenados desde cero, sin modelos pre-entrenados ni APIs."),
-  vineta("EcoNet, con 1,17 millones de parámetros, alcanzó un 83 % de exactitud en seis clases y un 97 % al separar orgánicos de inorgánicos, que es la decisión más importante para el usuario."),
+  vineta(`EcoNet, con 1,17 millones de parámetros, alcanzó un ${Math.round(100 * CNN.acc_test)} % de exactitud en seis clases y un ${Math.round(100 * CNN.acc_tipo)} % al separar orgánicos de inorgánicos, que es la decisión más importante para el usuario.`),
   vineta("Implementar el Transformer a mano permitió entender en la práctica la atención Q·K·V, las máscaras, la codificación posicional y la arquitectura codificador-decodificador. El mapa de atención cruzada muestra cómo el decodificador consulta la salida de la CNN para generar cada parte de la respuesta."),
   vineta("La combinación de visión por computador clásica (para localizar), una CNN (para reconocer) y un Transformer (para comunicar el resultado en lenguaje natural) resolvió los cinco requisitos del proyecto en un computador personal."),
   vineta("La diferencia frente a los modelos pre-entrenados muestra el valor del pre-entrenamiento con grandes volúmenes de datos, y también que con datos bien preparados, aumento de datos y una arquitectura adecuada se logran resultados útiles desde cero."));

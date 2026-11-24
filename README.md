@@ -43,8 +43,8 @@ pre-entrenados, pesos descargados, fine-tuning ni APIs externas.
 
 | Modelo | Métrica | Resultado |
 |---|---|---|
-| EcoNet (CNN) | Exactitud en prueba (6 clases) | **83,0 %** (F1 macro 0,832) |
-| EcoNet (CNN) | Exactitud orgánico vs. inorgánico | **97,2 %** |
+| EcoNet (CNN) | Exactitud en prueba (6 clases) | **88,7 %** (F1 macro 0,885) |
+| EcoNet (CNN) | Exactitud orgánico vs. inorgánico | **97,8 %** |
 | EcoTransformer | Respuesta exacta: frases vistas / frases nunca vistas | **100 %** / **74,5 %** |
 | EcoTransformer | Caneca correcta con frases nunca vistas | **88,7 %** |
 
@@ -81,7 +81,7 @@ py -3.12 -m venv .venv
    ```
 2. `.venv\Scripts\python prepare_data.py`
 3. Registrar el kernel: `.venv\Scripts\python -m ipykernel install --user --name residuos --display-name "Python (residuos)"`
-4. Ejecutar `notebooks/01_cnn_desde_cero.ipynb` (≈40 min con GPU) → genera `models/econet.pt`
+4. Ejecutar `notebooks/01_cnn_desde_cero.ipynb` (≈20 min con GPU, 100 épocas) → genera `models/econet.pt`
 5. Ejecutar `notebooks/02_transformer_desde_cero.ipynb` (≈8 min con GPU) → genera `models/ecotransformer.pt`
 6. `.venv\Scripts\python app.py` → http://127.0.0.1:7860
 
