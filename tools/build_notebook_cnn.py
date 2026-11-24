@@ -41,16 +41,9 @@ print('Dispositivo:', device, torch.cuda.get_device_name(0) if device == 'cuda' 
 
 C.append(md("## 1. Dataset\nDataset público *Garbage Classification (12 clases)*. `prepare_data.py` agrupa las clases en 6 (se unen los 3 tipos de vidrio y *biological* pasa a ser *orgánico*) y divide los datos en 70 % entrenamiento, 15 % validación y 15 % prueba. Las imágenes se cargan en memoria una sola vez para acelerar el entrenamiento."))
 
-C.append(code("""class Residuos(Dataset):
-    def __init__(self, split, tf):
-        self.items = [(p, CLASES.index(p.parent.name)) for p in sorted((DATA_PROC / split).glob('*/*.jpg'))]
-        self.imgs = [Image.open(p).convert('RGB').copy() for p, _ in self.items]
-        self.tf = tf
-    def __len__(self): return len(self.items)
-    def __getitem__(self, i): return self.tf(self.imgs[i]), self.items[i][1]
-
+C.append(code("""from src.cnn import Residuos   # dataset definido en src/cnn.py (necesario para cargar en paralelo)
 t0 = time.time()
-ds = {'train': Residuos('train', tf_entrenamiento), 'val': Residuos('val', tf_evaluacion), 'test': Residuos('test', tf_evaluacion)}
+ds = {'train': Residuos(DATA_PROC, 'train', tf_entrenamiento), 'val': Residuos(DATA_PROC, 'val', tf_evaluacion), 'test': Residuos(DATA_PROC, 'test', tf_evaluacion)}
 for k, d in ds.items():
     conteo = np.bincount([y for _, y in d.items], minlength=len(CLASES))
     print(f'{k:5s} {len(d):5d} imágenes', dict(zip(CLASES, conteo.tolist())))
@@ -80,9 +73,9 @@ x = torch.zeros(1, 3, TAM_IMAGEN, TAM_IMAGEN, device=device)
 for i, b in enumerate(modelo.features):
     x = b(x); print(f'Salida bloque {i+1}: {tuple(x.shape[1:])}')"""))
 
-C.append(md("## 3. Entrenamiento\n- **Función de pérdida:** entropía cruzada con *label smoothing* (0.1) y **pesos por clase**, porque vidrio tiene el doble de imágenes que las demás clases.\n- **Optimizador:** AdamW con política *One-Cycle* (la tasa de aprendizaje sube y luego baja suavemente).\n- **Precisión mixta (FP16)** en GPU para entrenar más rápido.\n- Se guarda el modelo con mejor F1 macro en validación."))
-C.append(code("""EPOCAS, LOTE = 45, 64
-dl_train = DataLoader(ds['train'], batch_size=LOTE, shuffle=True, num_workers=0, drop_last=True)
+C.append(md("## 3. Entrenamiento\n- **Función de pérdida:** entropía cruzada con *label smoothing* (0.1) y **pesos por clase**, porque vidrio tiene el doble de imágenes que las demás clases.\n- **Optimizador:** AdamW con política *One-Cycle* (la tasa de aprendizaje sube y luego baja suavemente).\n- **Precisión mixta (FP16)** en GPU para entrenar más rápido.\n- Se entrena durante 100 épocas, cargando y aumentando los datos en 6 procesos en paralelo para que la GPU no espere.\n- Se guarda el modelo con mejor F1 macro en validación."))
+C.append(code("""EPOCAS, LOTE = 100, 64
+dl_train = DataLoader(ds['train'], batch_size=LOTE, shuffle=True, num_workers=6, persistent_workers=True, drop_last=True)  # 6 núcleos para el aumento de datos
 dl_val = DataLoader(ds['val'], batch_size=128, num_workers=0)
 dl_test = DataLoader(ds['test'], batch_size=128, num_workers=0)
 

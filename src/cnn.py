@@ -61,6 +61,21 @@ tf_evaluacion = T.Compose([
 ])
 
 
+class Residuos(torch.utils.data.Dataset):
+    """Imágenes de data/processed/<split>/<clase>/*.jpg cargadas en memoria."""
+
+    def __init__(self, raiz, split, tf):
+        self.items = [(p, CLASES.index(p.parent.name)) for p in sorted((raiz / split).glob("*/*.jpg"))]
+        self.imgs = [Image.open(p).convert("RGB").copy() for p, _ in self.items]
+        self.tf = tf
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, i):
+        return self.tf(self.imgs[i]), self.items[i][1]
+
+
 class ClasificadorCNN:
     """Envoltura para usar la CNN entrenada en la aplicación."""
 
