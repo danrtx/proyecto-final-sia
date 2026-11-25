@@ -1,5 +1,10 @@
 """Crea un video de demostración tipo "banda transportadora" con imágenes del
-conjunto de PRUEBA (nunca vistas en el entrenamiento)."""
+conjunto de PRUEBA (nunca vistas en el entrenamiento).
+
+Simula una planta de reciclaje: los residuos entran por la izquierda y avanzan por 3 carriles
+de una banda. Sirve para probar el sistema completo (detección en video + CNN + tracker +
+Transformer) sin necesitar una banda real. Resultado: outputs/video_demo_banda.mp4
+(20 segundos, 25 cuadros por segundo = 500 cuadros)."""
 import random
 import sys
 from pathlib import Path
@@ -11,12 +16,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import DATA_PROC, RAIZ  # noqa: E402
 
-random.seed(7)
+random.seed(7)   # semilla fija: siempre se genera el mismo video
 W, H, FPS, SEG = 1280, 720, 25, 20
 VEL = 6  # píxeles por cuadro
 
 
 def fondo():
+    """Dibuja la banda transportadora (fondo gris con líneas verticales)."""
     img = np.full((H, W, 3), 55, np.uint8)
     cv2.rectangle(img, (0, 90), (W, H - 90), (75, 75, 80), -1)
     for x in range(0, W, 80):
@@ -36,6 +42,8 @@ def main():
     ultimo = {c: None for c in carriles}  # último objeto de cada carril
     for f in range(FPS * SEG):
         if f >= siguiente:
+            # Solo entra un objeto nuevo en un carril donde el anterior ya avanzó 60 px,
+            # para que los objetos no se toquen (si se tocan, la sustracción de fondo los une).
             libres = [c for c in carriles if ultimo[c] is None or ultimo[c][0] > 60]
             if libres:
                 img = cv2.imread(str(archivos[k % len(archivos)])); k += 1
@@ -47,6 +55,7 @@ def main():
                 objetos.append(o); ultimo[y] = o
             siguiente = f + random.randint(10, 18)
         frame = base.copy()
+        # Cada objeto avanza VEL píxeles por cuadro y se "pega" sobre la banda.
         for o in objetos:
             o[0] += VEL
             x, y, img = o

@@ -65,7 +65,8 @@ datos = {k: a_tensor(v) for k, v in dict(train=train, val=val, test_vistas=test_
 print({k: (tuple(s.shape), tuple(t.shape)) for k, (s, t) in datos.items()})"""))
 
 C.append(md("## 4. Modelo (pesos aleatorios)"))
-C.append(code("""HP = dict(d_modelo=128, n_cabezas=4, n_capas=3, d_ff=512, dropout=0.1)
+C.append(code("""# HIPERPARÁMETROS: vectores de 128, 4 cabezas de atención (d_k = 32), 3 capas de codificador y 3 de decodificador.
+HP = dict(d_modelo=128, n_cabezas=4, n_capas=3, d_ff=512, dropout=0.1)
 modelo = EcoTransformer(len(v_src), len(v_tgt), **HP).to(device)
 n = sum(p.numel() for p in modelo.parameters())
 print(f'Parámetros: {n:,} — 3 capas de codificador + 3 de decodificador, 4 cabezas de atención, d_modelo=128')"""))
@@ -73,12 +74,15 @@ print(f'Parámetros: {n:,} — 3 capas de codificador + 3 de decodificador, 4 ca
 C.append(md("## 5. Entrenamiento\nSe usa *teacher forcing*: el decodificador recibe la respuesta correcta desplazada una posición y aprende a predecir la siguiente palabra. La pérdida es la entropía cruzada sobre el vocabulario (sin contar el relleno `<pad>`)."))
 C.append(code("""EPOCAS, LOTE = 14, 128
 S_tr, T_tr = datos['train']
+# PÉRDIDA: entropía cruzada sobre las 267 palabras posibles en cada posición; el relleno <pad> no cuenta.
 criterio = nn.CrossEntropyLoss(ignore_index=PAD, label_smoothing=0.05)
+# OPTIMIZADOR AdamW + tasa One-Cycle (máximo 0,001), como en el artículo original del Transformer.
 optim = torch.optim.AdamW(modelo.parameters(), lr=1e-3, betas=(0.9, 0.98), weight_decay=0.01)
 pasos = EPOCAS * (len(S_tr) // LOTE)
 sched = torch.optim.lr_scheduler.OneCycleLR(optim, max_lr=1e-3, total_steps=pasos, pct_start=0.1)
 
 @torch.no_grad()
+# VALIDACIÓN: pérdida y ACCURACY POR TOKEN (% de palabras bien predichas con teacher forcing).
 def perdida_y_acc(S, Tg):
     modelo.eval(); tot, ok, n_tok, perd = 0, 0, 0, 0
     for i in range(0, len(S), 256):
@@ -93,9 +97,13 @@ for ep in range(1, EPOCAS + 1):
     modelo.train(); perm = torch.randperm(len(S_tr)); perd, nb = 0, 0
     for i in range(0, len(S_tr) - LOTE + 1, LOTE):
         idx = perm[i:i+LOTE]; s, t = S_tr[idx].to(device), T_tr[idx].to(device)
+        # TEACHER FORCING: el decodificador recibe la respuesta correcta SIN la última palabra
+        # (<sos> Plástico ( ...) y debe predecir la respuesta desplazada una posición (Plástico ( 2 ...).
         out = modelo(s, t[:, :-1])
         loss = criterio(out.reshape(-1, out.size(-1)), t[:, 1:].reshape(-1))
+        # BACKPROPAGATION: se calculan los gradientes de la pérdida respecto a cada peso.
         optim.zero_grad(set_to_none=True); loss.backward()
+        # Recorte de gradiente (máx. 1,0, evita saltos bruscos) y paso del optimizador.
         nn.utils.clip_grad_norm_(modelo.parameters(), 1.0); optim.step(); sched.step()
         perd += loss.item(); nb += 1
     vl, va = perdida_y_acc(*datos['val'])
@@ -114,6 +122,7 @@ plt.tight_layout(); plt.savefig(OUTPUTS / 'curvas_transformer.png', dpi=120); pl
 
 C.append(md("## 6. Evaluación: generación completa\nAhora el modelo genera la respuesta él solo, palabra por palabra (sin *teacher forcing*). Se mide:\n- **Coincidencia exacta:** la respuesta generada es idéntica a la esperada.\n- **Canecas correctas:** todas las canecas mencionadas en la respuesta esperada aparecen en la generada (lo más importante para el usuario)."))
 C.append(code("""import re
+# GENERACIÓN COMPLETA (sin teacher forcing): el modelo escribe solo, palabra por palabra (greedy).
 def generar_lote(pares):
     S, _ = a_tensor(pares); res = []
     for i in range(0, len(S), 256):
@@ -123,6 +132,8 @@ def generar_lote(pares):
             res.append(v_tgt.decodificar(ids))
     return res
 
+# MÉTRICAS: coincidencia exacta = respuesta idéntica a la esperada;
+#           canecas correctas = todas las canecas esperadas aparecen en la respuesta generada.
 def canecas(t): return sorted(re.findall(r'caneca (blanca|verde|negra)', t.lower()))
 modelo.eval(); resultados = {}
 for nombre in ['test_vistas', 'test_nuevas']:

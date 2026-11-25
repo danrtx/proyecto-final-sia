@@ -74,19 +74,28 @@ for i, b in enumerate(modelo.features):
     x = b(x); print(f'Salida bloque {i+1}: {tuple(x.shape[1:])}')"""))
 
 C.append(md("## 3. Entrenamiento\n- **Función de pérdida:** entropía cruzada con *label smoothing* (0.1) y **pesos por clase**, porque vidrio tiene el doble de imágenes que las demás clases.\n- **Optimizador:** AdamW con política *One-Cycle* (la tasa de aprendizaje sube y luego baja suavemente).\n- **Precisión mixta (FP16)** en GPU para entrenar más rápido.\n- Se entrena durante 100 épocas, cargando y aumentando los datos en 6 procesos en paralelo para que la GPU no espere.\n- Se guarda el modelo con mejor F1 macro en validación."))
-C.append(code("""EPOCAS, LOTE = 100, 64
+C.append(code("""# ÉPOCA = una pasada completa por las 4 601 imágenes de entrenamiento.
+# LOTE (batch) = 64 imágenes que se procesan juntas antes de actualizar los pesos (71 lotes por época).
+EPOCAS, LOTE = 100, 64
 dl_train = DataLoader(ds['train'], batch_size=LOTE, shuffle=True, num_workers=6, persistent_workers=True, drop_last=True)  # 6 núcleos para el aumento de datos
 dl_val = DataLoader(ds['val'], batch_size=128, num_workers=0)
 dl_test = DataLoader(ds['test'], batch_size=128, num_workers=0)
 
+# PESOS POR CLASE: las clases con menos imágenes pesan más en la pérdida (vidrio tiene el doble).
 conteo = np.bincount([y for _, y in ds['train'].items], minlength=len(CLASES))
 pesos = torch.tensor(conteo.sum() / (len(CLASES) * conteo), dtype=torch.float32, device=device)
+# FUNCIÓN DE PÉRDIDA: entropía cruzada = -log(probabilidad que la red le dio a la clase correcta).
+# Label smoothing 0,1: no se exige un 100 % de seguridad, lo que evita la sobreconfianza.
 criterio = nn.CrossEntropyLoss(weight=pesos, label_smoothing=0.1)
+# OPTIMIZADOR AdamW: ajusta cada peso en la dirección que reduce la pérdida (weight decay = regularización).
 optim = torch.optim.AdamW(modelo.parameters(), lr=2e-3, weight_decay=5e-4)
+# TASA DE APRENDIZAJE One-Cycle: sube hasta 0,002 al inicio y baja suavemente hasta casi 0 al final.
 sched = torch.optim.lr_scheduler.OneCycleLR(optim, max_lr=2e-3, epochs=EPOCAS, steps_per_epoch=len(dl_train))
+# PRECISIÓN MIXTA (FP16): operaciones con números de 16 bits para entrenar más rápido en la GPU.
 scaler = torch.amp.GradScaler(enabled=(device == 'cuda'))
 
 @torch.no_grad()
+# EVALUACIÓN (validación o prueba): modelo.eval() desactiva dropout; se calculan pérdida, accuracy y F1 macro.
 def evaluar(dl):
     modelo.eval(); ys, ps, perdida = [], [], 0
     for x, y in dl:
@@ -98,17 +107,22 @@ def evaluar(dl):
 
 hist, mejor_f1, t0 = [], 0, time.time()
 for ep in range(1, EPOCAS + 1):
+    # modelo.train(): activa dropout y el modo de entrenamiento de BatchNorm.
     modelo.train(); perd, aciertos, total = 0, 0, 0
     for x, y in dl_train:
         x, y = x.to(device), y.to(device)
+        # 1) Se borran los gradientes del lote anterior.
         optim.zero_grad(set_to_none=True)
         with torch.autocast(device, enabled=(device == 'cuda')):
+            # 2) FORWARD: la red predice el lote y se calcula la PÉRDIDA.
             out = modelo(x); loss = criterio(out, y)
+        # 3) BACKPROPAGATION (.backward() calcula los gradientes) y 4) paso del optimizador + tasa de aprendizaje.
         scaler.scale(loss).backward(); scaler.step(optim); scaler.update(); sched.step()
         perd += loss.item() * len(y); aciertos += (out.argmax(-1) == y).sum().item(); total += len(y)
     vl, va, vf, _, _ = evaluar(dl_val)
     hist.append(dict(epoca=ep, train_loss=perd/total, train_acc=aciertos/total, val_loss=vl, val_acc=va, val_f1=vf))
     marca = ''
+    # SELECCIÓN DEL MEJOR MODELO: se guarda cuando mejora el F1 en validación (evita quedarse con un modelo sobreajustado).
     if vf > mejor_f1:
         mejor_f1 = vf; marca = '  <- mejor'
         torch.save({'modelo': modelo.state_dict(), 'clases': CLASES, 'epoca': ep, 'val_f1': vf}, CNN_PESOS)
@@ -127,13 +141,16 @@ plt.tight_layout(); plt.savefig(OUTPUTS / 'curvas_cnn.png', dpi=120); plt.show()
 C.append(md("## 5. Evaluación en el conjunto de prueba (imágenes nunca vistas)"))
 C.append(code("""ckpt = torch.load(CNN_PESOS, map_location=device); modelo.load_state_dict(ckpt['modelo'])
 print('Mejor época:', ckpt['epoca'])
+# PRUEBA FINAL: 989 imágenes nunca vistas -> accuracy = aciertos / total (877 / 989 = 88,7 %).
 tl, ta, tf1, ys, ps = evaluar(dl_test)
 nombres = [INFO_CLASES[c]['nombre'] for c in CLASES]
 print(f'Accuracy test: {ta:.4f} | F1 macro: {tf1:.4f}\\n')
 print(classification_report(ys, ps, target_names=nombres, digits=3))
+# ORGÁNICO vs INORGÁNICO: se convierte la clase real y la predicha a su tipo y se cuentan coincidencias (97,8 %).
 tipo = lambda c: INFO_CLASES[CLASES[c]]['tipo']
 acc_tipo = np.mean([tipo(a) == tipo(b) for a, b in zip(ys, ps)])
 print(f'Accuracy orgánico vs inorgánico: {acc_tipo:.4f}')
+# MATRIZ DE CONFUSIÓN: filas = clase real, columnas = predicción; la diagonal son los aciertos.
 cm = confusion_matrix(ys, ps)
 plt.figure(figsize=(7, 6))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Greens', xticklabels=nombres, yticklabels=nombres)
