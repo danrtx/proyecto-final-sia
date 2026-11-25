@@ -7,3 +7,5 @@ __pycache__/
 # Pesados: se regeneran (ver README)
 data/
 models/
+
+informe/
